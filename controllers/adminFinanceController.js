@@ -22,56 +22,65 @@ exports.getLastOperations = async (req, res) => {
 
     const filtre = {};
 
-    // Année scolaire
     if (anneeScolaire) {
       filtre.anneeScolaire = anneeScolaire;
     }
 
-    // Mois (string dans le modèle: Septembre, Octobre, ...)
+    // Mois: tu envoies 1 → Janvier, 2 → Février, etc.
     if (mois) {
-      // tu peux mapper 1→Septembre, 2→Octobre, etc. si besoin
-      // ici on suppose que le frontend envoie déjà le texte correct,
-      // sinon adapte avec un mapping.
-      filtre.mois = mois;
+      const intMois = parseInt(mois, 10);
+      const mapMois = {
+        1: 'Janvier',
+        2: 'Février',
+        3: 'Mars',
+        4: 'Avril',
+        5: 'Mai',
+        6: 'Juin',
+        7: 'Juillet',
+        8: 'Août',
+        9: 'Septembre',
+        10: 'Octobre',
+        11: 'Novembre',
+        12: 'Décembre',
+      };
+      const mNom = mapMois[intMois];
+      if (mNom) {
+        filtre.mois = mNom;
+      }
     }
 
-    // Classe
     if (classeId) {
-      // dans ton modèle tu as classe (ObjectId) + classeRef + classeNom
       filtre.$or = [
         { classe: classeId },
         { classeRef: classeId },
       ];
     }
 
-    // Période de dates
     if (dateDebut || dateFin) {
       filtre.datePaiement = {};
       if (dateDebut) {
         filtre.datePaiement.$gte = new Date(dateDebut);
       }
       if (dateFin) {
-        // fin de journée
         const end = new Date(dateFin);
         end.setHours(23, 59, 59, 999);
         filtre.datePaiement.$lte = end;
       }
     }
 
-    // On prend uniquement les paiements valides
     filtre.statut = 'valid';
 
     const paiements = await Paiement.find(filtre)
-      .sort({ datePaiement: -1 })       // plus récents d’abord
-      .limit(20)                        // 20 dernières opérations
+      .sort({ datePaiement: -1 })
+      .limit(20)
       .lean();
 
     const operations = paiements.map((p) => ({
       id: p._id,
       dateOperation: p.datePaiement || p.createdAt,
       type: p.typePaiement || 'Paiement',
-      eleveNom: p.eleveNom || 'Inconnu',
-      classeNom: p.classeNom || (p.classe && p.classe.nom) || 'Non définie',
+      eleveNom: p.eleveNom || p.eleve?.nom || 'Inconnu',
+      classeNom: p.classeNom || p.classe || 'Non définie',
       montant: p.montant || p.montantPaye || 0,
       auteur: p.percepteurNom || 'Percepteur',
       moyenPaiement: p.moyenPaiement || p.modePaiement || 'Cash',
@@ -112,10 +121,8 @@ exports.getFinanceMensuelle = async (req, res) => {
       ];
     }
 
-    // uniquement paiements valides
     filtre.statut = 'valid';
 
-    // Agrégation par mois (champ string "Septembre", etc.)
     const data = await Paiement.aggregate([
       { $match: filtre },
       {
@@ -139,7 +146,6 @@ exports.getFinanceMensuelle = async (req, res) => {
       'Juin',
     ];
 
-    // Map pour retrouver les totaux
     const map = new Map();
     data.forEach((d) => map.set(d._id, d.total));
 
@@ -156,6 +162,87 @@ exports.getFinanceMensuelle = async (req, res) => {
     return res.status(500).json({
       success: false,
       message: 'Erreur lors du calcul des encaissements mensuels.',
+      error: err.message,
+    });
+  }
+};
+
+/**
+ * GET /admin/finance/evolution-jours
+ * Encaissements des 10 derniers jours pour le dashboard admin
+ * Query: anneeScolaire?, classeId?
+ */
+exports.getEvolutionJours = async (req, res) => {
+  try {
+    const { anneeScolaire, classeId } = req.query;
+
+    const filtre = {};
+    const now = new Date();
+    const dixJoursAvant = new Date();
+    dixJoursAvant.setDate(now.getDate() - 9); // 10 jours incluant aujourd'hui
+
+    filtre.datePaiement = {
+      $gte: new Date(dixJoursAvant.setHours(0, 0, 0, 0)),
+      $lte: new Date(now.setHours(23, 59, 59, 999)),
+    };
+
+    if (anneeScolaire) {
+      filtre.anneeScolaire = anneeScolaire;
+    }
+
+    if (classeId) {
+      filtre.$or = [
+        { classe: classeId },
+        { classeRef: classeId },
+      ];
+    }
+
+    filtre.statut = 'valid';
+
+    const data = await Paiement.aggregate([
+      { $match: filtre },
+      {
+        $group: {
+          _id: {
+            $dateToString: { format: '%Y-%m-%d', date: '$datePaiement' },
+          },
+          total: { $sum: '$montant' },
+        },
+      },
+      { $sort: { _id: 1 } },
+    ]);
+
+    // Map jour -> total
+    const map = new Map();
+    data.forEach((d) => map.set(d._id, d.total));
+
+    // Générer les 10 derniers jours dans l'ordre
+    const labels = [];
+    const values = [];
+
+    const cursor = new Date(dixJoursAvant);
+    for (let i = 0; i < 10; i++) {
+      const y = cursor.getFullYear();
+      const m = String(cursor.getMonth() + 1).padStart(2, '0');
+      const d = String(cursor.getDate()).padStart(2, '0');
+      const key = `${y}-${m}-${d}`;
+
+      labels.push(`${d}/${m}`); // 07/01, 08/01…
+      values.push(map.get(key) || 0);
+
+      cursor.setDate(cursor.getDate() + 1);
+    }
+
+    return res.json({
+      success: true,
+      labels,
+      values,
+    });
+  } catch (err) {
+    console.error('❌ Erreur getEvolutionJours:', err);
+    return res.status(500).json({
+      success: false,
+      message: 'Erreur lors du calcul de l’évolution journalière.',
       error: err.message,
     });
   }

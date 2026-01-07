@@ -737,6 +737,8 @@ router.get('/rapport-classes/export-pdf', percepteurRapportClassesController.exp
 
 router.get('/rapport-classes', percepteurRapportClassesController.getRapportClasses);
 
+
+
 // ============================================================
 // CLASSES (routes génériques)
 // ============================================================

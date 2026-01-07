@@ -490,6 +490,73 @@ exports.updateContactsEleve = async (req, res, next) => {
   }
 };
 
+// ⬇️ fonction réutilisable
+async function buildElevesFusion(filterOptions = {}) {
+  const {
+    anneeScolaire,
+    classeId,
+    niveau
+  } = filterOptions;
+
+  const annee = anneeScolaire || process.env.ANNEE_SCOLAIRE_DEFAUT || '2025-2026';
+
+  const filter = { anneeScolaire: annee };
+
+  if (classeId) {
+    filter.classe = classeId;
+  }
+  if (niveau) {
+    filter.niveau = niveau;
+  }
+
+  const eleves = await Eleve.find(filter)
+    .populate('classe', 'nom niveau montantFrais')
+    .lean();
+
+  if (eleves.length === 0) return [];
+
+  const eleveIds = eleves.map(e => e._id.toString());
+
+  const paiements = await Paiement.find({
+    eleveId: { $in: eleveIds },
+    anneeScolaire: annee,
+    statut: { $in: ['valid', 'validé'] }
+  }).lean();
+
+  const paiementsParEleve = {};
+  paiements.forEach(p => {
+    const key = p.eleveId?.toString() || p.eleve?.toString();
+    if (!key) return;
+    if (!paiementsParEleve[key]) paiementsParEleve[key] = [];
+    paiementsParEleve[key].push(p);
+  });
+
+  return eleves.map(e => {
+    const key = e._id.toString();
+    const paiementsEleve = paiementsParEleve[key] || [];
+    const totalPaye = paiementsEleve.reduce((sum, p) => sum + (p.montant || 0), 0);
+
+    const montantDu = e.montantDu || e.classe?.montantFrais || 0;
+    const solde = Math.max(0, montantDu - totalPaye);
+    const taux = montantDu > 0 ? (totalPaye / montantDu) * 100 : 0;
+    const estAJour = solde <= 0 || taux >= 100;
+
+    return {
+      ...e,
+      classeId: e.classe?._id || e.classe || null,
+      classeNom: e.classe?.nom || e.classeNom || '—',
+      niveau: e.classe?.niveau || e.niveau || '—',
+      totalPaye,
+      montantDu,
+      solde,
+      tauxPaiement: taux,
+      estAJour,
+      paiements: paiementsEleve,
+    };
+  });
+}
+
+
 /* ============================================================
    🆕 CRÉER UN ÉLÈVE AVEC MATRICULE PRO (5 CHIFFRES + '-' + 3 LETTRES)
 ============================================================ */

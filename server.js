@@ -88,6 +88,9 @@ const parentsRoutes = require('./routes/parents');
 const analyseRouter = require('./routes/analyse');
 const statistiquesRoutes = require('./routes/statistiquesRoutes');
 const adminFinanceRoutes = require('./routes/adminFinanceRoutes');
+const exportFicheEleveRoutes = require('./routes/exportFicheEleve');
+const percepteurRapportClassesRoutes = require('./routes/percepteurRapportClasses');
+
 
 // ✅ NOUVELLES ROUTES PROFIL PERCEPTEUR (User mongoose)
 // ⬇️ on récupère UNIQUEMENT la fonction authenticate déjà exportée
@@ -109,6 +112,9 @@ app.use('/api/parents', parentsRoutes);
 app.use('/api/analyse', analyseRouter);
 app.use('/api/statistiques', statistiquesRoutes);
 app.use('/api/admin', adminFinanceRoutes);
+app.use('/api/export-fiche', exportFicheEleveRoutes);
+app.use('/api/percepteur/rapport-classes', percepteurRapportClassesRoutes);
+
 
 // ✅ Montage des routes profil percepteur protégées par auth
 // (on ajoute juste cette ligne, rien d’autre n’est modifié)
@@ -128,6 +134,17 @@ app.get('/api/health', (req, res) => {
     mongodb: 'connected'
   });
 });
+
+// ========== ROUTE RACINE ========== 
+app.get('/', (req, res) => {
+  res.json({
+    success: true,
+    message: 'Bienvenue sur le backend Gabkut Schola - Collège Le Mérite',
+    timestamp: new Date().toISOString(),
+    apiDocumentation: '/api/health'
+  });
+});
+
 
 // ========== GESTION ERREURS 404 ==========
 app.use((req, res, next) => {

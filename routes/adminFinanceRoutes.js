@@ -1,14 +1,12 @@
 /************************************************************
  📘 GABKUT SCHOLA - ROUTES ADMIN FINANCE
- Lecture seule pour le dashboard admin
 *************************************************************/
 
 const express = require('express');
 const router = express.Router();
 
 const adminFinanceController = require('../controllers/adminFinanceController');
-
-// Optionnel : middleware auth admin
+// éventuellement middleware d’auth admin
 // const { requireAdmin } = require('../middleware/auth');
 
 // Dernières opérations financières
@@ -18,11 +16,18 @@ router.get(
   adminFinanceController.getLastOperations
 );
 
-// Encaissements mensuels (pour le graphique)
+// Encaissements mensuels (graphe bar)
 router.get(
   '/finance/mensuel',
   // requireAdmin,
   adminFinanceController.getFinanceMensuelle
+);
+
+// Évolution journalière (10 derniers jours)
+router.get(
+  '/finance/evolution-jours',
+  // requireAdmin,
+  adminFinanceController.getEvolutionJours
 );
 
 module.exports = router;
