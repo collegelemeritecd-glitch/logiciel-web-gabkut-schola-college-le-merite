@@ -11,6 +11,8 @@
   },
   "dependencies": {
     "bcryptjs": "^2.4.3",
+    "canvas": "^3.2.1",
+    "chart.js": "^4.5.1",
     "cors": "^2.8.5",
     "docx": "^9.5.1",
     "dotenv": "^16.6.1",
@@ -21,6 +23,7 @@
     "mongoose": "^8.21.0",
     "mongoose-lean-virtuals": "^2.1.0",
     "multer": "^2.0.2",
+    "node-fetch": "^2.7.0",
     "nodemailer": "^7.0.12",
     "pdfkit": "^0.17.2",
     "pdfmake": "^0.2.21",

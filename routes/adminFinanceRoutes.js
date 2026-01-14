@@ -30,6 +30,13 @@ router.get(
   adminFinanceController.getEvolutionJours
 );
 
+// Répartition par modes de paiement (doughnut)
+router.get(
+  '/finance/modes',
+  // requireAdmin,
+  adminFinanceController.getModesPaiementDashboard
+);
+
 module.exports = router;
 
 console.log('routes/adminFinanceRoutes.js chargé');

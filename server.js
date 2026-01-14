@@ -91,6 +91,12 @@ const adminFinanceRoutes = require('./routes/adminFinanceRoutes');
 const exportFicheEleveRoutes = require('./routes/exportFicheEleve');
 const percepteurRapportClassesRoutes = require('./routes/percepteurRapportClasses');
 const percepteurRoutesv2 = require('./routes/percepteurRoutesv2');
+const publicRoutes = require('./routes/publicRoutes');
+const maxicashRoutes = require('./routes/maxicashRoutes');
+const publicMaxicashConfig = require('./routes/publicMaxicashConfig');
+const publicPaiementsRoutes = require('./routes/publicPaiementsRoutes');
+const debugRoutes = require('./routes/debugRoutes');
+
 
 // ✅ NOUVELLES ROUTES PROFIL PERCEPTEUR (User mongoose)
 const { authenticate } = require('./middlewares/auth');
@@ -114,6 +120,18 @@ app.use('/api/admin', adminFinanceRoutes);
 app.use('/api/export-fiche', exportFicheEleveRoutes);
 app.use('/api/percepteur/rapport-classes', percepteurRapportClassesRoutes);
 app.use('/api/percepteur', percepteurRoutesv2);
+app.use('/api/public', publicRoutes);
+app.use('/api/public', publicMaxicashConfig);
+app.use('/api/public/paiements', publicPaiementsRoutes);
+// ✅ Routes debug (FORCÉES en local)
+app.use('/api/debug', debugRoutes);
+
+
+
+
+// ✅ Routes MaxiCash (AJUSTÉ UNIQUEMENT ICI)
+// Tout ce qui est MaxiCash sera accessible sous /api/maxicash/...
+app.use('/api/maxicash', maxicashRoutes);
 
 // ✅ Routes profil percepteur protégées
 app.use('/api/percepteur', authenticate, percepteurProfilRoutes);
@@ -157,13 +175,13 @@ app.use((req, res, next) => {
 app.use(errorHandler);
 
 // ========== DÉMARRAGE SERVEUR ==========
-// ========== DÉMARRAGE SERVEUR ==========
 const server = app.listen(PORT, () => {
   console.log('');
   console.log('🚀 ========================================');
   console.log('✅ Serveur Collège Le Mérite démarré');
   console.log('📡 Port:', PORT);
   console.log('🌍 URL: http://localhost:' + PORT);
+  console.log('NODE_ENV =', process.env.NODE_ENV);
   console.log(
     '🔐 CORS Origins:',
     allowedOrigins.join(', ')
@@ -177,7 +195,6 @@ const server = app.listen(PORT, () => {
 
 // ➜ exporter app pour les scripts de debug
 module.exports = app;
-
 
 // ========== GESTION ARRÊT PROPRE ==========
 process.on('SIGTERM', () => {

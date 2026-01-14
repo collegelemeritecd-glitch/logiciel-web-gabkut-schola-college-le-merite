@@ -1316,6 +1316,10 @@ router.get('/journal/export-zip', async (req, res) => {
   }
 });
 
+// après les autres routes paiements
+router.get('/paiements/:id/pdf', percepteurPaiementsController.getPaiementPDF);
+
+
 // 2) Ensuite seulement les routes journal “simples”
 router.get('/journal', percepteurJournalController.getJournal);
 router.get('/journal/:date', percepteurJournalController.getJournalByDate);

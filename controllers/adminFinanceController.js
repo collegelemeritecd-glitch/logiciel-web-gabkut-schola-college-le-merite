@@ -1,6 +1,7 @@
 /************************************************************
  📘 GABKUT SCHOLA - ADMIN FINANCE CONTROLLER
  Lecture seule des données Percepteur/Comptable pour l’admin
+ controllers/adminFinanceController.js 
 *************************************************************/
 
 const Paiement = require('../models/Paiement');
@@ -68,7 +69,8 @@ exports.getLastOperations = async (req, res) => {
       }
     }
 
-    filtre.statut = 'valid';
+    filtre.statut = { $in: ['validé', 'valid', 'success'] };
+
 
     const paiements = await Paiement.find(filtre)
       .sort({ datePaiement: -1 })
@@ -121,7 +123,8 @@ exports.getFinanceMensuelle = async (req, res) => {
       ];
     }
 
-    filtre.statut = 'valid';
+    filtre.statut = { $in: ['validé', 'valid', 'success'] };
+
 
     const data = await Paiement.aggregate([
       { $match: filtre },
@@ -197,7 +200,8 @@ exports.getEvolutionJours = async (req, res) => {
       ];
     }
 
-    filtre.statut = 'valid';
+    filtre.statut = { $in: ['validé', 'valid', 'success'] };
+
 
     const data = await Paiement.aggregate([
       { $match: filtre },
@@ -221,17 +225,18 @@ exports.getEvolutionJours = async (req, res) => {
     const values = [];
 
     const cursor = new Date(dixJoursAvant);
-    for (let i = 0; i < 10; i++) {
+        for (let i = 0; i < 10; i++) {
       const y = cursor.getFullYear();
       const m = String(cursor.getMonth() + 1).padStart(2, '0');
       const d = String(cursor.getDate()).padStart(2, '0');
-      const key = `${y}-${m}-${d}`;
+      const key = `${y}-${m}-${d}`; // 👈 ICI : utiliser m (latin), pas м
 
       labels.push(`${d}/${m}`); // 07/01, 08/01…
       values.push(map.get(key) || 0);
 
       cursor.setDate(cursor.getDate() + 1);
     }
+
 
     return res.json({
       success: true,
@@ -242,7 +247,78 @@ exports.getEvolutionJours = async (req, res) => {
     console.error('❌ Erreur getEvolutionJours:', err);
     return res.status(500).json({
       success: false,
-      message: 'Erreur lors du calcul de l’évolution journalière.',
+      message: "Erreur lors du calcul de l’évolution journalière.",
+      error: err.message,
+    });
+  }
+};
+
+/**
+ * GET /admin/finance/modes
+ * Répartition des montants par mode de paiement (doughnut)
+ * Query: anneeScolaire?, classeId?, dateDebut?, dateFin?
+ */
+exports.getModesPaiementDashboard = async (req, res) => {
+  try {
+    const {
+      anneeScolaire,
+      classeId,
+      dateDebut,
+      dateFin,
+    } = req.query;
+
+    const filtre = {};
+
+    if (anneeScolaire) {
+      filtre.anneeScolaire = anneeScolaire;
+    }
+
+    if (classeId) {
+      filtre.$or = [
+        { classe: classeId },
+        { classeRef: classeId },
+      ];
+    }
+
+    if (dateDebut || dateFin) {
+      filtre.datePaiement = {};
+      if (dateDebut) {
+        filtre.datePaiement.$gte = new Date(dateDebut);
+      }
+      if (dateFin) {
+        const end = new Date(dateFin);
+        end.setHours(23, 59, 59, 999);
+        filtre.datePaiement.$lte = end;
+      }
+    }
+
+    filtre.statut = { $in: ['validé', 'valid', 'success'] };
+
+
+    const data = await Paiement.aggregate([
+      { $match: filtre },
+      {
+        $group: {
+          _id: '$modePaiement',
+          total: { $sum: '$montant' },
+        },
+      },
+      { $sort: { total: -1 } },
+    ]);
+
+    const labels = data.map(d => d._id || 'Inconnu');
+    const values = data.map(d => d.total || 0);
+
+    return res.json({
+      success: true,
+      labels,
+      values,
+    });
+  } catch (err) {
+    console.error('❌ Erreur getModesPaiementDashboard:', err);
+    return res.status(500).json({
+      success: false,
+      message: 'Erreur lors du calcul des modes de paiement.',
       error: err.message,
     });
   }

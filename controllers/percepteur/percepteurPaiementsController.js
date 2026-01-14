@@ -586,4 +586,69 @@ exports.envoyerRecu = async (req, res, next) => {
   }
 };
 
+exports.getPaiementPDF = async (req, res, next) => {
+  try {
+    const { id } = req.params;
+
+    const paiement = await Paiement.findById(id).lean();
+    if (!paiement) {
+      return res.status(404).json({
+        success: false,
+        message: 'Paiement introuvable'
+      });
+    }
+
+    if (!generateSchoolReceiptPDF) {
+      return res.status(500).json({
+        success: false,
+        message: 'Module PDF non disponible'
+      });
+    }
+
+    const paiementPourPDF = {
+      reference: paiement.reference,
+      eleveNom: paiement.eleveNom + ' ' + (paiement.elevePrenom || ''),
+      classeNom: paiement.classeNom,
+      mois: paiement.mois,
+      anneeScolaire: paiement.anneeScolaire || paiement.anneeConcernee,
+      montant: paiement.montant,
+      modePaiement: paiement.modePaiement || paiement.moyenPaiement,
+      datePaiement: paiement.datePaiement,
+      parentNom: paiement.parentNom || 'Parent',
+      parentContact: paiement.telephoneParent || '—',
+      emailParent: paiement.emailParent || '—',
+      percepteurNom: paiement.percepteurNom,
+      emailPercepteur: paiement.emailPercepteur,
+      noteIA: 'Paiement enregistré avec succès.',
+      signaturePath: null
+    };
+
+    let pdfPath = await generateSchoolReceiptPDF(paiementPourPDF, paiement.reference);
+
+    if (!pdfPath || !fs.existsSync(pdfPath)) {
+      console.error(`⚠️ PDF non trouvé: ${pdfPath}`);
+      return res.status(500).json({
+        success: false,
+        message: 'Erreur lors de la génération du PDF'
+      });
+    }
+
+    res.setHeader('Content-Type', 'application/pdf');
+    res.setHeader(
+      'Content-Disposition',
+      `attachment; filename="Recu-${paiement.reference || id}.pdf"`
+    );
+
+    const stream = fs.createReadStream(pdfPath);
+    stream.on('error', (err) => {
+      console.error('Erreur lecture PDF:', err);
+      return res.status(500).end();
+    });
+    stream.pipe(res);
+  } catch (error) {
+    console.error('❌ Erreur getPaiementPDF:', error);
+    next(error);
+  }
+};
+
 console.log('✅ Percepteur Paiements Controller chargé - VERSION ULTRA-COMPLÈTE CORRIGÉE');
