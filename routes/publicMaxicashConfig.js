@@ -40,17 +40,19 @@ router.get('/maxicash-config', (req, res) => {
     });
   }
 
-  const response = {
+    const response = {
     success: true,
     env,
     paymentUrl,
     merchantId: process.env.MAXICASH_MERCHANT_ID,
     merchantPass: process.env.MAXICASH_MERCHANT_PASS,
-    accepturl: `${frontBase.replace(/\/+$/, '')}/api/maxicash/accept`,
-    declineurl: `${frontBase.replace(/\/+$/, '')}/api/maxicash/decline`,
-    cancelurl: `${frontBase.replace(/\/+$/, '')}/api/maxicash/cancel`,
+    // 👉 Toutes les URLs MaxiCash doivent pointer vers le backend (apiBase)
+    accepturl: `${apiBase.replace(/\/+$/, '')}/maxicash/accept`,
+    declineurl: `${apiBase.replace(/\/+$/, '')}/maxicash/decline`,
+    cancelurl: `${apiBase.replace(/\/+$/, '')}/maxicash/cancel`,
     notifyurl: `${apiBase.replace(/\/+$/, '')}/maxicash`,
   };
+
 
   console.log('✅ [MaxiCash Config] Config envoyée au front:', response);
 
