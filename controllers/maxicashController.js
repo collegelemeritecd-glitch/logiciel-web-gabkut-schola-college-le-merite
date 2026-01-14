@@ -169,15 +169,23 @@ exports.handleNotify = async (req, res) => {
       Email,
     } = payload;
 
-    // 0) Sécurité credentials
-    // 0) Sécurité credentials (adapté au payload réel)
-if (!MerchantID && !MerchantPassword) {
-  console.warn('⚠️ Webhook sans MerchantID/MerchantPassword, on continue en se fiant à l’intention et au montant.');
-} else if (MerchantID !== MERCHANT_ID || MerchantPassword !== MERCHANT_PASS) {
-  console.error('❌ Webhook MerchantID / Password invalides', { MerchantID, MerchantPassword });
-  return res.status(403).send('Forbidden');
-}
+    // Normalisation des champs susceptibles d'être en minuscules
+    const amountRaw = Amount ?? payload.amount;
+    const txId = TransactionID ?? payload.transactionid;
+    const currency = Currency ?? payload.currency;
 
+    // 0) Sécurité credentials (adapté au payload réel)
+    if (!MerchantID && !MerchantPassword) {
+      console.warn(
+        '⚠️ Webhook sans MerchantID/MerchantPassword, on continue en se fiant à l’intention et au montant.'
+      );
+    } else if (MerchantID !== MERCHANT_ID || MerchantPassword !== MERCHANT_PASS) {
+      console.error('❌ Webhook MerchantID / Password invalides', {
+        MerchantID,
+        MerchantPassword,
+      });
+      return res.status(403).send('Forbidden');
+    }
 
     // 1) Vérifier statut Maxicash (on ne traite que les succès)
     const statusEffective = ResponseStatus || Status;
@@ -199,7 +207,7 @@ if (!MerchantID && !MerchantPassword) {
     // 3) Idempotence (au cas où Maxicash renvoie plusieurs fois le même notify)
     const existing = await Paiement.findOne({
       referencePaiement: Reference,
-      transactionExterneId: TransactionID || undefined,
+      transactionExterneId: txId || undefined,
     }).lean();
 
     if (existing) {
@@ -208,7 +216,7 @@ if (!MerchantID && !MerchantPassword) {
     }
 
     // 4) Montant webhook en devise (à partir des cents)
-    const montantWebhook = centsToAmount(Amount);
+    const montantWebhook = centsToAmount(amountRaw);
     const tolerance = 0.01; // +/- 0.01 USD de tolérance
 
     // 5) Récupérer l'intention PENDING la plus récente
@@ -223,7 +231,10 @@ if (!MerchantID && !MerchantPassword) {
       .sort({ createdAt: -1 })
       .lean();
 
-    console.log('🔎 Intention candidate (pending + montant cohérent) pour', Reference, '=>',
+    console.log(
+      '🔎 Intention candidate (pending + montant cohérent) pour',
+      Reference,
+      '=>',
       intention
         ? {
             id: intention._id,
@@ -243,18 +254,17 @@ if (!MerchantID && !MerchantPassword) {
           matricule: Reference,
           montantWebhook,
           statusEffective,
-          tx: TransactionID,
+          tx: txId,
         }
       );
 
-      // Option : alerter élève/parent/école d’une anomalie de paiement
       try {
         if (envoyerEmailsIntelligents) {
           const pseudoPaiement = {
             reference: generatePaiementReference('COLM-ALERT'),
             referencePaiement: Reference,
             montant: montantWebhook,
-            devise: Currency || DEVISE,
+            devise: currency || DEVISE,
             mois: null,
             anneeScolaire: ANNEE_SCOLAIRE,
             modePaiement: 'Mobile Money',
@@ -280,7 +290,6 @@ if (!MerchantID && !MerchantPassword) {
         console.error('⚠️ Erreur envoi emails ALERTE (non bloquant):', err.message);
       }
 
-      // Log activité système
       try {
         await LogActivite.create({
           utilisateur: null,
@@ -292,22 +301,21 @@ if (!MerchantID && !MerchantPassword) {
           details: JSON.stringify({
             referenceMatricule: Reference,
             montantWebhook,
-            deviseWebhook: Currency,
+            deviseWebhook: currency,
             status: statusEffective,
-            transactionId: TransactionID,
+            transactionId: txId,
           }),
         });
       } catch (err) {
         console.error('⚠️ Erreur log activité (anomalie):', err.message);
       }
 
-      // On répond 200 pour éviter que Maxicash ne renvoie en boucle
       return res.status(200).send('Ignored (no matching intention)');
     }
 
     // 7) À partir d’ici : intention cohérente TROUVÉE -> on crédite
     const montant = Number(intention.montant || 0);
-    const devise = intention.devise || Currency || DEVISE;
+    const devise = intention.devise || currency || DEVISE;
 
     // 8) Chercher l’élève par matricule / référencePaiement
     const eleve = await Eleve.findOne({
@@ -365,7 +373,7 @@ if (!MerchantID && !MerchantPassword) {
       moyenPaiement: moyen,
       modePaiement: moyen,
       datePaiement: now,
-      transactionExterneId: TransactionID || undefined,
+      transactionExterneId: txId || undefined,
 
       telephoneEleve: intention.telephonePayer || Telephone || undefined,
       emailEleve: intention.emailPayer || Email || undefined,
@@ -422,7 +430,7 @@ if (!MerchantID && !MerchantPassword) {
           status: 'confirmed',
           paiementCree: paiement._id,
           lastMaxicashStatus: statusEffective,
-          lastTransactionId: TransactionID || null,
+          lastTransactionId: txId || null,
         },
       },
       { runValidators: false }
@@ -542,7 +550,7 @@ if (!MerchantID && !MerchantPassword) {
           montant: paiement.montant,
           devise: paiement.devise,
           status: statusEffective,
-          transactionId: TransactionID,
+          transactionId: txId,
         }),
       });
     } catch (err) {
@@ -555,4 +563,3 @@ if (!MerchantID && !MerchantPassword) {
     return res.status(500).send('Internal error');
   }
 };
-
