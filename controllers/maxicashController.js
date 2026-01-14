@@ -413,7 +413,7 @@ exports.handleNotify = async (req, res) => {
       paiementData.eleveNom = `Inconnu (${Reference})`;
     }
 
-    // 11) Création du paiement
+        // 11) Création du paiement
     const paiement = await Paiement.create(paiementData);
     console.log(
       '✅ Paiement créé via webhook:',
@@ -511,36 +511,7 @@ exports.handleNotify = async (req, res) => {
       pdfPath = null;
     }
 
-    // 15) Emails (élève / parent / école)
-    try {
-      if (envoyerEmailsIntelligents) {
-        const paiementForEmail = paiement.toObject();
-        paiementForEmail.emailEleve = paiementForEmail.emailEleve || null;
-        paiementForEmail.emailParent = paiementForEmail.emailParent || null;
-        paiementForEmail.emailPercepteur = paiementForEmail.emailPercepteur || null;
-        paiementForEmail.emailEcole = ECOLE_EMAIL;
-
-        console.log('👁 Destinataires email calculés:', {
-          eleve: paiementForEmail.emailEleve,
-          parent: paiementForEmail.emailParent,
-          percepteur: paiementForEmail.emailPercepteur,
-          ecole: paiementForEmail.emailEcole,
-        });
-
-        if (paiementForEmail.emailEleve || paiementForEmail.emailParent) {
-          await envoyerEmailsIntelligents(paiementForEmail, pdfPath);
-          console.log('✉️ Emails de reçu envoyés (élève/parent/école) via webhook.');
-        } else {
-          console.log('ℹ️ Aucun email élève/parent, skip envoi.');
-        }
-      } else {
-        console.log('ℹ️ envoyerEmailsIntelligents non défini, aucun email envoyé.');
-      }
-    } catch (err) {
-      console.error('⚠️ Erreur envoi emails (non bloquant):', err.message);
-    }
-
-    // 16) Log activité normal
+    // 16) Log activité normal (on le garde dans le flux principal)
     try {
       await LogActivite.create({
         utilisateur: null,
@@ -561,7 +532,46 @@ exports.handleNotify = async (req, res) => {
       console.error('⚠️ Erreur log activité (non bloquant):', err.message);
     }
 
-    return res.status(200).send('OK');
+    // On répond D'ABORD à MaxiCash pour ne pas bloquer le webhook
+    res.status(200).send('OK');
+
+    // 15) Emails (élève / parent / école) en arrière-plan
+    setImmediate(async () => {
+      try {
+        if (envoyerEmailsIntelligents) {
+          const paiementForEmail = paiement.toObject();
+          paiementForEmail.emailEleve = paiementForEmail.emailEleve || null;
+          paiementForEmail.emailParent = paiementForEmail.emailParent || null;
+          paiementForEmail.emailPercepteur = paiementForEmail.emailPercepteur || null;
+          paiementForEmail.emailEcole = ECOLE_EMAIL;
+
+          console.log('👁 Destinataires email calculés (async):', {
+            eleve: paiementForEmail.emailEleve,
+            parent: paiementForEmail.emailParent,
+            percepteur: paiementForEmail.emailPercepteur,
+            ecole: paiementForEmail.emailEcole,
+          });
+
+          if (paiementForEmail.emailEleve || paiementForEmail.emailParent) {
+            await envoyerEmailsIntelligents(paiementForEmail, pdfPath);
+            console.log(
+              '✉️ Emails de reçu envoyés (élève/parent/école) via webhook (async).'
+            );
+          } else {
+            console.log('ℹ️ Aucun email élève/parent, skip envoi (async).');
+          }
+        } else {
+          console.log(
+            'ℹ️ envoyerEmailsIntelligents non défini, aucun email envoyé (async).'
+          );
+        }
+      } catch (err) {
+        console.error('⚠️ Erreur envoi emails (non bloquant, async):', err.message);
+      }
+    });
+
+    // rien après, on a déjà répondu
+    return;
   } catch (err) {
     console.error('❌ Erreur handleNotify:', err);
     return res.status(500).send('Internal error');
