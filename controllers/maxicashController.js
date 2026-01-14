@@ -94,7 +94,7 @@ exports.handleAccept = async (req, res) => {
     const refMatricule = reference || Reference || '';
 
     const frontBase =
-      process.env.PUBLIC_FRONT_BASE_URL || 'http://localhost:8080';
+      process.env.PUBLIC_FRONT_BASE_URL || 'https://collegelemerite.school';
     const redirectUrl = new URL('/public-paiement-maxicash-success.html', frontBase);
 
     if (refMatricule) {
