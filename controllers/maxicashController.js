@@ -215,9 +215,13 @@ exports.handleNotify = async (req, res) => {
       return res.status(200).send('Already processed');
     }
 
-    // 4) Montant webhook en devise (à partir des cents)
-    const montantWebhook = centsToAmount(amountRaw);
-    const tolerance = 0.01; // +/- 0.01 USD de tolérance
+    // 4) Montant webhook en devise (MaxiCash envoie déjà en USD, pas en cents)
+    const montantWebhook = Number(amountRaw || 0);
+    if (!Number.isFinite(montantWebhook) || montantWebhook <= 0) {
+      console.error('❌ Montant webhook invalide:', amountRaw);
+      return res.status(400).send('Invalid Amount');
+    }
+    const tolerance = 0.01; // +/- 0.01 USD
 
     // 5) Récupérer l'intention PENDING la plus récente
     let intention = await PaiementIntention.findOne({
