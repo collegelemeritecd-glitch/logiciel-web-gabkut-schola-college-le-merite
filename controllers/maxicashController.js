@@ -170,10 +170,14 @@ exports.handleNotify = async (req, res) => {
     } = payload;
 
     // 0) Sécurité credentials
-    if (MerchantID !== MERCHANT_ID || MerchantPassword !== MERCHANT_PASS) {
-      console.error('❌ Webhook MerchantID / Password invalides');
-      return res.status(403).send('Forbidden');
-    }
+    // 0) Sécurité credentials (adapté au payload réel)
+if (!MerchantID && !MerchantPassword) {
+  console.warn('⚠️ Webhook sans MerchantID/MerchantPassword, on continue en se fiant à l’intention et au montant.');
+} else if (MerchantID !== MERCHANT_ID || MerchantPassword !== MERCHANT_PASS) {
+  console.error('❌ Webhook MerchantID / Password invalides', { MerchantID, MerchantPassword });
+  return res.status(403).send('Forbidden');
+}
+
 
     // 1) Vérifier statut Maxicash (on ne traite que les succès)
     const statusEffective = ResponseStatus || Status;
