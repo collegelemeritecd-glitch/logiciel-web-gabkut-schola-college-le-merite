@@ -536,39 +536,52 @@ exports.handleNotify = async (req, res) => {
     res.status(200).send('OK');
 
     // 15) Emails (élève / parent / école) en arrière-plan
-    setImmediate(async () => {
-      try {
-        if (envoyerEmailsIntelligents) {
-          const paiementForEmail = paiement.toObject();
-          paiementForEmail.emailEleve = paiementForEmail.emailEleve || null;
-          paiementForEmail.emailParent = paiementForEmail.emailParent || null;
-          paiementForEmail.emailPercepteur = paiementForEmail.emailPercepteur || null;
-          paiementForEmail.emailEcole = ECOLE_EMAIL;
+    // 15) Emails (élève / parent / école) en arrière-plan
+setImmediate(async () => {
+  try {
+    // Filtre: seulement si mode/moyen de paiement est Mobile Money
+    const mode = paiement.modePaiement || paiement.moyenPaiement || '';
+    if (!mode || mode.toLowerCase().indexOf('mobile') === -1) {
+      console.log('ℹ️ Paiement non Mobile Money, aucun email auto déclenché (async).', {
+        mode,
+        ref: paiement.reference,
+      });
+      return;
+    }
 
-          console.log('👁 Destinataires email calculés (async):', {
-            eleve: paiementForEmail.emailEleve,
-            parent: paiementForEmail.emailParent,
-            percepteur: paiementForEmail.emailPercepteur,
-            ecole: paiementForEmail.emailEcole,
-          });
+    if (!envoyerEmailsIntelligents) {
+      console.log(
+        'ℹ️ envoyerEmailsIntelligents non défini, aucun email envoyé (async).'
+      );
+      return;
+    }
 
-          if (paiementForEmail.emailEleve || paiementForEmail.emailParent) {
-            await envoyerEmailsIntelligents(paiementForEmail, pdfPath);
-            console.log(
-              '✉️ Emails de reçu envoyés (élève/parent/école) via webhook (async).'
-            );
-          } else {
-            console.log('ℹ️ Aucun email élève/parent, skip envoi (async).');
-          }
-        } else {
-          console.log(
-            'ℹ️ envoyerEmailsIntelligents non défini, aucun email envoyé (async).'
-          );
-        }
-      } catch (err) {
-        console.error('⚠️ Erreur envoi emails (non bloquant, async):', err.message);
-      }
+    const paiementForEmail = paiement.toObject();
+    paiementForEmail.emailEleve = paiementForEmail.emailEleve || null;
+    paiementForEmail.emailParent = paiementForEmail.emailParent || null;
+    paiementForEmail.emailPercepteur = paiementForEmail.emailPercepteur || null;
+    paiementForEmail.emailEcole = ECOLE_EMAIL;
+
+    console.log('👁 Destinataires email calculés (async):', {
+      eleve: paiementForEmail.emailEleve,
+      parent: paiementForEmail.emailParent,
+      percepteur: paiementForEmail.emailPercepteur,
+      ecole: paiementForEmail.emailEcole,
     });
+
+    if (paiementForEmail.emailEleve || paiementForEmail.emailParent) {
+      await envoyerEmailsIntelligents(paiementForEmail, pdfPath);
+      console.log(
+        '✉️ Emails de reçu envoyés (élève/parent/école) via webhook (async).'
+      );
+    } else {
+      console.log('ℹ️ Aucun email élève/parent, skip envoi (async).');
+    }
+  } catch (err) {
+    console.error('⚠️ Erreur envoi emails (non bloquant, async):', err.message);
+  }
+});
+
 
     // rien après, on a déjà répondu
     return;
