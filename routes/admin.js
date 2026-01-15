@@ -21,6 +21,7 @@ const adminClassesReportController = require('../controllers/admin/adminClassesR
 const adminFinanceHistoriqueController = require('../controllers/admin/adminFinanceHistoriqueController');
 const adminElevesAnalyseController = require('../controllers/admin/adminElevesAnalyseController');
 const adminClassesSegmentExportController = require('../controllers/admin/adminClassesSegmentExportController');
+const { envoyerMailsMobileMoney } = require('../controllers/adminMobileMoneyEmailsController');
 
 
 
@@ -114,6 +115,7 @@ router.get(
 
 // Relance parents en retard
 router.post('/reports/relance-parents', adminReportsController.relanceParentsEnRetard);
+router.post('/paiements/mobile-money/envoyer-mails', envoyerMailsMobileMoney);
 
 module.exports = router;
 
