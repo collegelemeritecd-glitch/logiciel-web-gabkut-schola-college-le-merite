@@ -16,12 +16,13 @@ const { SCHOOL_INFO } = require("./generateSchoolReceiptPDF");
 ====================================================================== */
 
 const transporter = nodemailer.createTransport({
-  host: process.env.SMTP_HOST2 || "smtp-relay.brevo.com",
-  port: Number(process.env.SMTP_PORT2) || 587,
+  host: process.env.SMTP_HOST || "smtp.gmail.com",
+  port: Number(process.env.SMTP_PORT) || 587,
   secure: false, // STARTTLS
+  tls: { rejectUnauthorized: false },
   auth: {
-    user: process.env.SMTP_USER2,
-    pass: process.env.SMTP_PASS2,
+    user: process.env.SMTP_USER,
+    pass: process.env.SMTP_PASS || process.env.EMAIL_PASSWORD,
   },
   logger: true,
   debug: true,
