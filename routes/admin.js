@@ -22,6 +22,7 @@ const adminFinanceHistoriqueController = require('../controllers/admin/adminFina
 const adminElevesAnalyseController = require('../controllers/admin/adminElevesAnalyseController');
 const adminClassesSegmentExportController = require('../controllers/admin/adminClassesSegmentExportController');
 const { envoyerMailsMobileMoney } = require('../controllers/adminMobileMoneyEmailsController');
+const adminTeachersController = require('../controllers/admin/adminTeachersController');
 
 
 
@@ -51,6 +52,16 @@ router.get('/classes/:id', adminClassesController.getClasseById);
 router.post('/classes', adminClassesController.createClasse);
 router.put('/classes/:id', adminClassesController.updateClasse);
 router.delete('/classes/:id', adminClassesController.deleteClasse);
+
+// Enseignants CRUD 
+// Enseignants CRUD (PAS de /admin ici)
+// URL finale: /api/admin/teachers...
+router.get('/teachers', adminTeachersController.getTeachers);
+router.get('/teachers/:id', adminTeachersController.getTeacherById);
+router.post('/teachers', adminTeachersController.createTeacher);
+router.put('/teachers/:id', adminTeachersController.updateTeacher);
+router.delete('/teachers/:id', adminTeachersController.deleteTeacher);
+
 
 // Rapport classes
 router.get('/classes/report', adminClassesReportController.getClassesReportJson);
