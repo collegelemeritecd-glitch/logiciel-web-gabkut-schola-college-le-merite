@@ -3,9 +3,10 @@ const jwt = require('jsonwebtoken');
 const User = require('../../models/User');
 
 // @desc    Connexion utilisateur
+// @desc    Connexion utilisateur
 exports.login = async (req, res, next) => {
   try {
-    const { email, password } = req.body;
+    let { email, password } = req.body;
 
     console.log('📥 Tentative de connexion:', email);
 
@@ -13,27 +14,34 @@ exports.login = async (req, res, next) => {
     if (!email || !password) {
       return res.status(400).json({
         success: false,
-        message: 'Email et mot de passe requis'
+        message: 'Email et mot de passe requis',
       });
     }
 
+    // Normaliser l'email comme dans le schéma
+    email = email.toLowerCase().trim();
+
     // Vérifier l'utilisateur
     const user = await User.findOne({ email });
+    console.log('🔍 User trouvé:', user && { email: user.email, role: user.role });
+
     if (!user) {
       console.log('❌ Utilisateur non trouvé:', email);
       return res.status(401).json({
         success: false,
-        message: 'Email ou mot de passe incorrect'
+        message: 'Email ou mot de passe incorrect',
       });
     }
 
     // Vérifier le mot de passe
     const isMatch = await bcrypt.compare(password, user.password);
+    console.log('🔐 Résultat compare:', { email, isMatch });
+
     if (!isMatch) {
       console.log('❌ Mot de passe incorrect pour:', email);
       return res.status(401).json({
         success: false,
-        message: 'Email ou mot de passe incorrect'
+        message: 'Email ou mot de passe incorrect',
       });
     }
 
@@ -42,7 +50,7 @@ exports.login = async (req, res, next) => {
       console.log('❌ Compte désactivé:', email);
       return res.status(403).json({
         success: false,
-        message: 'Compte désactivé. Contactez l\'administrateur.'
+        message: "Compte désactivé. Contactez l'administrateur.",
       });
     }
 
@@ -62,8 +70,8 @@ exports.login = async (req, res, next) => {
         fullName: user.fullName,
         email: user.email,
         role: user.role,
-        phone: user.phone
-      }
+        phone: user.phone,
+      },
     });
 
     console.log(`✅ Connexion réussie: ${user.email} (${user.role})`);

@@ -9,6 +9,7 @@ const authMiddleware = require("../../middlewares/authMiddleware");
 const requireRole = require("../../middlewares/requireRole");
 
 const comptableController = require("../../controllers/comptable/comptableController");
+const comptableBudgetController = require("../../controllers/comptable/comptableBudgetController");
 
 // Protection globale
 router.use(authMiddleware);
@@ -35,6 +36,7 @@ router.get(
 
 // 📗 Balance générale (tous les comptes)
 router.get("/balance", comptableController.getBalanceGenerale);
+
 router.get(
   "/balance-export-excel",
   comptableController.exportBalanceGeneraleExcel
@@ -57,7 +59,25 @@ router.get("/bilan-export-excel", comptableController.exportBilanExcel);
 
 router.get("/compte-resultat-export-with-amortissements", comptableController.exportCompteResultatWithAmortissements);
 
+// Budget annuel (revenus, dépenses, épargne)
+router.get("/budget-annuel", comptableController.getBudgetAnnuel);
+router.get("/budget-annuel-export-excel", comptableController.exportBudgetAnnuelExcel);
 
+// 📊 Paramètres du budget (dépenses fixes / variables / crédits / épargne)
+router.get(
+  "/budget-parametres",
+  comptableBudgetController.getBudgetParametres
+);
+
+router.post(
+  "/budget-parametres",
+  comptableBudgetController.saveBudgetParametres
+);
+
+router.get(
+  "/budget-mensuel",
+  comptableBudgetController.getBudgetMensuel
+);
 
 module.exports = router;
 

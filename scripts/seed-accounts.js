@@ -1,11 +1,10 @@
+// scripts/seed-accounts.js
 const mongoose = require('mongoose');
-const bcrypt = require('bcryptjs');
 require('dotenv').config();
 
 const User = require('../models/User');
 
 const MONGODB_URI = process.env.MONGODB_URI;
-const BCRYPT_ROUNDS = parseInt(process.env.BCRYPT_ROUNDS || '12', 10);
 
 const seedAccounts = async () => {
   try {
@@ -70,21 +69,18 @@ const seedAccounts = async () => {
 
     for (const acc of accounts) {
       // Vérifier si déjà existant
-      let existing = await User.findOne({ email: acc.email });
+      const existing = await User.findOne({ email: acc.email });
 
       if (existing) {
         console.log(`ℹ️  Compte déjà existant : ${acc.email}`);
         continue;
       }
 
-      // Hasher le mot de passe
-      const hashed = await bcrypt.hash(acc.password, BCRYPT_ROUNDS);
-
-      // Créer l'utilisateur
+      // NE PAS hasher ici, laisser le pre('save') du modèle User faire le travail
       const user = await User.create({
         fullName: acc.fullName,
         email: acc.email,
-        password: hashed,
+        password: acc.password, // mot de passe en clair
         role: acc.role,
         phone: acc.phone,
         isSystemAccount: true,
@@ -100,7 +96,7 @@ const seedAccounts = async () => {
     console.log('');
     console.log('📋 COMPTES DE TEST :');
     console.log('');
-    accounts.forEach(acc => {
+    accounts.forEach((acc) => {
       console.log(`   ${acc.role.toUpperCase()}`);
       console.log(`   Email    : ${acc.email}`);
       console.log(`   Password : ${acc.password}`);

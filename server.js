@@ -94,11 +94,15 @@ const publicMaxicashConfig = require("./routes/publicMaxicashConfig");
 const publicPaiementsRoutes = require("./routes/publicPaiementsRoutes");
 const debugRoutes = require("./routes/debugRoutes");
 
+
 // Comptable
 const comptableRoutes = require("./routes/comptable/comptableRoutes");
 const journalRoutes = require("./routes/comptable/journal.routes");
 const piecesComptableRoutes = require("./routes/comptable/pieces.routes");
 const immobilisationsRoutes = require('./routes/comptable/immobilisations.routes');
+const teacherRoutes = require('./routes/teachers/teacherRoutes');
+const classesRoutes = require('./routes/classesRoutes');
+
 
 // ✅ NOUVELLES ROUTES PROFIL PERCEPTEUR (User mongoose)
 const { authenticate } = require("./middlewares/auth");
@@ -132,6 +136,11 @@ app.use("/api/debug", debugRoutes);
 app.use("/api/comptable", journalRoutes);
 app.use("/api/comptable", piecesComptableRoutes);
 app.use('/api/comptable/immobilisations', immobilisationsRoutes);
+app.use('/api/teachers', teacherRoutes);
+app.use('/api/classes', classesRoutes);
+app.use('/api/teachers', teacherRoutes); // déjà en place
+
+
 // Anciennes routes comptables (dashboard, etc.) ENSUITE
 app.use("/api/comptable", comptableRoutes);
 

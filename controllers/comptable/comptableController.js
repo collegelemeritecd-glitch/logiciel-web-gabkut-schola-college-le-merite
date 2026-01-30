@@ -5,6 +5,11 @@
 const ExcelJS = require("exceljs");
 const EcritureComptable = require("../../models/comptable/EcritureComptable");
 const BalanceService = require("../../services/BalanceService");
+const DepenseBudget = require('../../models/DepenseBudget');
+const Eleve = require('../../models/Eleve');
+const Paiement = require('../../models/Paiement');
+const Classe = require('../../models/Classe');
+
 
 /**
  * Outils internes : bornes de période
@@ -2301,5 +2306,400 @@ exports.exportCompteResultatWithAmortissements = async (req, res, next) => {
   } catch (err) {
     console.error("Erreur exportCompteResultatWithAmortissements:", err);
     next(err);
+  }
+};
+
+
+// PARTIE BUDGET //
+
+
+/// GET /api/comptable/budget-annuel?anneeScolaire=2025-2026&annee=2025&classeId=...
+exports.getBudgetAnnuel = async (req, res, next) => {
+  try {
+    const {
+      anneeScolaire = process.env.ANNEE_SCOLAIRE_DEFAUT || '2025-2026',
+      annee,               // année civile pour regrouper les paiements
+      classeId
+    } = req.query;
+
+    const year = parseInt(annee, 10) || new Date().getFullYear();
+
+    console.log('📊 Budget annuel (comptable):', { anneeScolaire, year, classeId });
+
+    // 1) Filtrer les élèves actifs (même logique que getFinanceKpis)
+    const eleveFilter = {
+      statut: 'actif',
+      anneeScolaire
+    };
+
+    if (classeId) {
+      eleveFilter.classe = classeId;
+    }
+
+    const eleves = await Eleve.find(eleveFilter).populate('classe');
+
+    // 2) Montant attendu annuel = somme des frais par élève (frais * 1 an)
+    // Ici on reste simple: montantFrais de la classe = attendu pour l’année
+    let attenduAnnuel = 0;
+    for (const eleve of eleves) {
+      if (eleve.classe && eleve.classe.montantFrais) {
+        attenduAnnuel += eleve.classe.montantFrais;
+      }
+    }
+
+    // 3) Construire la liste d'ids élèves pour filtrer les paiements
+    const elevesIds = eleves.map(e => e._id);
+
+    // 4) Récupérer tous les paiements validés pour l'année civile
+    const startYear = new Date(year, 0, 1, 0, 0, 0, 0);
+    const endYear = new Date(year, 11, 31, 23, 59, 59, 999);
+
+    const paiementFilter = {
+      statut: 'validé',
+      anneeScolaire,
+      datePaiement: { $gte: startYear, $lte: endYear }
+    };
+
+    if (classeId) {
+      paiementFilter.eleve = { $in: elevesIds };
+    }
+
+    const paiements = await Paiement.find(paiementFilter).lean();
+
+    // 5) Regrouper par mois
+    const months = [
+      'Janvier', 'Février', 'Mars', 'Avril',
+      'Mai', 'Juin', 'Juillet', 'Août',
+      'Septembre', 'Octobre', 'Novembre', 'Décembre'
+    ];
+
+    const recapMois = months.map((label, index) => ({
+      mois: index + 1,
+      label,
+      revenusPrevus: 0,     // on reste simple: attenduAnnuel/12, ajustable
+      revenusReels: 0,
+      depensesPrevues: 0,   // à remplir plus tard via une autre collection
+      depensesReelles: 0,   // idem
+      epargnePrevue: 0,     // idem
+      epargneReelle: 0      // idem
+    }));
+
+    // Répartition uniforme de l'attendu sur 12 mois
+    const attenduMensuel = attenduAnnuel / 12;
+    recapMois.forEach(m => {
+      m.revenusPrevus = attenduMensuel;
+    });
+
+    // Total payé et réparti par mois
+    let totalPayeAnnuel = 0;
+
+    for (const p of paiements) {
+      if (!p.datePaiement) continue;
+      const d = new Date(p.datePaiement);
+      const m = d.getMonth(); // 0-11
+
+      const montant = p.montant || 0;
+      totalPayeAnnuel += montant;
+
+      if (recapMois[m]) {
+        recapMois[m].revenusReels += montant;
+      }
+    }
+
+    // 6) Calculer résultat mensuel + totaux
+    let totalDepensesPrevues = 0;
+    let totalDepensesReelles = 0;
+    let totalEpargnePrevue = 0;
+    let totalEpargneReelle = 0;
+
+    recapMois.forEach(m => {
+      // résultat mensuel = revenus réels - dépenses réelles (pour l'instant dépenses=0)
+      m.resultat = (m.revenusReels || 0) - (m.depensesReelles || 0);
+
+      totalDepensesPrevues += m.depensesPrevues || 0;
+      totalDepensesReelles += m.depensesReelles || 0;
+      totalEpargnePrevue += m.epargnePrevue || 0;
+      totalEpargneReelle += m.epargneReelle || 0;
+    });
+
+    const resultatAnnuel = totalPayeAnnuel - totalDepensesReelles;
+
+    const response = {
+      success: true,
+      anneeScolaire,
+      annee: year,
+      attenduAnnuel,
+      totalRevenusReels: totalPayeAnnuel,
+      totalDepensesPrevues,
+      totalDepensesReelles,
+      totalEpargnePrevue,
+      totalEpargneReelle,
+      resultatAnnuel,
+      recapMois
+    };
+
+    return res.status(200).json(response);
+  } catch (err) {
+    console.error('❌ Erreur getBudgetAnnuel:', err);
+    return next(err);
+  }
+};
+
+
+// GET /api/comptable/budget-annuel-export-excel?anneeScolaire=2025-2026&annee=2025
+exports.exportBudgetAnnuelExcel = async (req, res, next) => {
+  try {
+    const {
+      anneeScolaire = process.env.ANNEE_SCOLAIRE_DEFAUT || '2025-2026',
+      annee
+    } = req.query;
+
+    const year = parseInt(annee, 10) || new Date().getFullYear();
+
+    // On réutilise la même logique que getBudgetAnnuel
+    const eleveFilter = {
+      statut: 'actif',
+      anneeScolaire
+    };
+
+    const eleves = await Eleve.find(eleveFilter).populate('classe');
+
+    let attenduAnnuel = 0;
+    for (const eleve of eleves) {
+      if (eleve.classe && eleve.classe.montantFrais) {
+        attenduAnnuel += eleve.classe.montantFrais;
+      }
+    }
+
+    const elevesIds = eleves.map(e => e._id);
+
+    const startYear = new Date(year, 0, 1, 0, 0, 0, 0);
+    const endYear = new Date(year, 11, 31, 23, 59, 59, 999);
+
+    const paiementFilter = {
+      statut: 'validé',
+      anneeScolaire,
+      datePaiement: { $gte: startYear, $lte: endYear }
+    };
+
+    // (optionnel) si tu veux filtrer par classe, tu peux ajouter classeId dans req.query
+    if (req.query.classeId) {
+      paiementFilter.eleve = { $in: elevesIds.filter(id => !!id) };
+    }
+
+    const paiements = await Paiement.find(paiementFilter).lean();
+
+    const months = [
+      'Janvier', 'Février', 'Mars', 'Avril',
+      'Mai', 'Juin', 'Juillet', 'Août',
+      'Septembre', 'Octobre', 'Novembre', 'Décembre'
+    ];
+
+    const recapMois = months.map((label, index) => ({
+      mois: index + 1,
+      label,
+      revenusPrevus: 0,
+      revenusReels: 0,
+      depensesPrevues: 0,
+      depensesReelles: 0,
+      epargnePrevue: 0,
+      epargneReelle: 0
+    }));
+
+    const attenduMensuel = attenduAnnuel / 12;
+    recapMois.forEach(m => {
+      m.revenusPrevus = attenduMensuel;
+    });
+
+    let totalPayeAnnuel = 0;
+    for (const p of paiements) {
+      if (!p.datePaiement) continue;
+      const d = new Date(p.datePaiement);
+      const m = d.getMonth(); // 0-11
+      const montant = p.montant || 0;
+      totalPayeAnnuel += montant;
+      if (recapMois[m]) {
+        recapMois[m].revenusReels += montant;
+      }
+    }
+
+    recapMois.forEach(m => {
+      m.resultat = (m.revenusReels || 0) - (m.depensesReelles || 0);
+    });
+
+    const resultatAnnuel =
+      totalPayeAnnuel - recapMois.reduce((sum, m) => sum + (m.depensesReelles || 0), 0);
+
+    // ===== Création du classeur Excel =====
+    const workbook = new ExcelJS.Workbook();
+    workbook.creator = 'Gabkut Schola';
+    workbook.lastModifiedBy = 'Budget annuel';
+    const now = new Date();
+    workbook.created = now;
+    workbook.modified = now;
+
+    const sheet = workbook.addWorksheet(`Budget ${year}`, {
+      views: [{ state: 'frozen', ySplit: 4 }]
+    });
+
+    const headerFill = {
+      type: 'pattern',
+      pattern: 'solid',
+      fgColor: { argb: 'FFE5E7EB' }
+    };
+
+    const titleFill = {
+      type: 'pattern',
+      pattern: 'solid',
+      fgColor: { argb: 'FF1D4ED8' }
+    };
+
+    const borderThin = {
+      top: { style: 'thin', color: { argb: 'FF9CA3AF' } },
+      left: { style: 'thin', color: { argb: 'FF9CA3AF' } },
+      bottom: { style: 'thin', color: { argb: 'FF9CA3AF' } },
+      right: { style: 'thin', color: { argb: 'FF9CA3AF' } }
+    };
+
+    // Titre
+    sheet.mergeCells('A1', 'H1');
+    sheet.getCell('A1').value = `Budget annuel - Collège Le Mérite`;
+    sheet.getCell('A1').font = { bold: true, size: 16, color: { argb: 'FFFFFFFF' } };
+    sheet.getCell('A1').alignment = { vertical: 'middle', horizontal: 'center' };
+    sheet.getCell('A1').fill = titleFill;
+
+    sheet.mergeCells('A2', 'H2');
+    sheet.getCell('A2').value = `Année civile ${year} - Année scolaire ${anneeScolaire}`;
+    sheet.getCell('A2').font = { bold: true, size: 12, color: { argb: 'FFFFFFFF' } };
+    sheet.getCell('A2').alignment = { vertical: 'middle', horizontal: 'center' };
+    sheet.getCell('A2').fill = titleFill;
+
+    sheet.getRow(1).height = 24;
+    sheet.getRow(2).height = 20;
+
+    sheet.addRow(); // Ligne vide (3)
+
+    // En-têtes colonnes
+    sheet.columns = [
+      { header: 'Mois', key: 'mois', width: 18 },
+      { header: 'Revenus prévus', key: 'revPrev', width: 20 },
+      { header: 'Revenus réels', key: 'revReel', width: 20 },
+      { header: 'Dépenses prévues', key: 'depPrev', width: 20 },
+      { header: 'Dépenses réelles', key: 'depReel', width: 20 },
+      { header: 'Épargne prévue', key: 'eparPrev', width: 20 },
+      { header: 'Épargne réelle', key: 'eparReel', width: 20 },
+      { header: 'Résultat', key: 'resultat', width: 18 }
+    ];
+
+    const headerRow = sheet.getRow(4);
+    headerRow.font = { bold: true, color: { argb: 'FF111827' } };
+    headerRow.alignment = { horizontal: 'center', vertical: 'middle' };
+    headerRow.fill = headerFill;
+    headerRow.height = 18;
+    headerRow.eachCell(cell => {
+      cell.border = borderThin;
+    });
+
+    // Lignes mois
+    let totalRevPrev = 0;
+    let totalRevReel = 0;
+    let totalDepPrev = 0;
+    let totalDepReel = 0;
+    let totalEparPrev = 0;
+    let totalEparReel = 0;
+    let totalResultat = 0;
+
+    recapMois.forEach(m => {
+      const row = sheet.addRow({
+        mois: m.label,
+        revPrev: m.revenusPrevus || 0,
+        revReel: m.revenusReels || 0,
+        depPrev: m.depensesPrevues || 0,
+        depReel: m.depensesReelles || 0,
+        eparPrev: m.epargnePrevue || 0,
+        eparReel: m.epargneReelle || 0,
+        resultat: m.resultat || 0
+      });
+
+      row.eachCell((cell, colNumber) => {
+        cell.border = borderThin;
+        cell.alignment = {
+          vertical: 'middle',
+          horizontal: colNumber === 1 ? 'left' : 'right'
+        };
+        if (colNumber > 1) {
+          cell.numFmt = '#,##0.00';
+        }
+      });
+
+      totalRevPrev += m.revenusPrevus || 0;
+      totalRevReel += m.revenusReels || 0;
+      totalDepPrev += m.depensesPrevues || 0;
+      totalDepReel += m.depensesReelles || 0;
+      totalEparPrev += m.epargnePrevue || 0;
+      totalEparReel += m.epargneReelle || 0;
+      totalResultat += m.resultat || 0;
+    });
+
+    // Ligne totaux
+    const totalRow = sheet.addRow({
+      mois: 'TOTAL',
+      revPrev: totalRevPrev,
+      revReel: totalRevReel,
+      depPrev: totalDepPrev,
+      depReel: totalDepReel,
+      eparPrev: totalEparPrev,
+      eparReel: totalEparReel,
+      resultat: totalResultat
+    });
+
+    totalRow.font = { bold: true, color: { argb: 'FF111827' } };
+    totalRow.eachCell((cell, colNumber) => {
+      cell.border = borderThin;
+      cell.fill = {
+        type: 'pattern',
+        pattern: 'solid',
+        fgColor: { argb: 'FFE0F2FE' }
+      };
+      cell.alignment = {
+        vertical: 'middle',
+        horizontal: colNumber === 1 ? 'left' : 'right'
+      };
+      if (colNumber > 1) {
+        cell.numFmt = '#,##0.00';
+      }
+    });
+
+    sheet.addRow();
+
+    const noteRow = sheet.addRow({
+      mois:
+        "Remarque : pour l'instant, seules les recettes (paiements validés) sont prises en compte. " +
+        'Les dépenses et l’épargne seront alimentées via les paramètres budget.'
+    });
+    sheet.mergeCells(noteRow.number, 1, noteRow.number, 8);
+    noteRow.getCell(1).font = {
+      italic: true,
+      size: 10,
+      color: { argb: 'FF6B7280' }
+    };
+    noteRow.getCell(1).alignment = {
+      vertical: 'middle',
+      horizontal: 'left',
+      wrapText: true
+    };
+
+    const fileName = `budget-annuel-${year}.xlsx`;
+    res.setHeader(
+      'Content-Type',
+      'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet'
+    );
+    res.setHeader('Content-Disposition', `attachment; filename=${fileName}`);
+
+    await workbook.xlsx.write(res);
+    res.end();
+  } catch (err) {
+    console.error('❌ Erreur exportBudgetAnnuelExcel:', err);
+    return next(err);
   }
 };

@@ -23,7 +23,7 @@ const adminElevesAnalyseController = require('../controllers/admin/adminElevesAn
 const adminClassesSegmentExportController = require('../controllers/admin/adminClassesSegmentExportController');
 const { envoyerMailsMobileMoney } = require('../controllers/adminMobileMoneyEmailsController');
 const adminTeachersController = require('../controllers/admin/adminTeachersController');
-
+const adminAttributionsController = require('../controllers/admin/adminAttributionsController');
 
 
 // Protection globale
@@ -62,7 +62,11 @@ router.post('/teachers', adminTeachersController.createTeacher);
 router.put('/teachers/:id', adminTeachersController.updateTeacher);
 router.delete('/teachers/:id', adminTeachersController.deleteTeacher);
 
-
+// Attributions de cours (URL finale: /api/admin/attributions...)
+router.get('/attributions', adminAttributionsController.getAttributions);
+router.post('/attributions', adminAttributionsController.createAttribution);
+router.put('/attributions/:id', adminAttributionsController.updateAttribution);
+router.delete('/attributions/:id', adminAttributionsController.deleteAttribution);
 // Rapport classes
 router.get('/classes/report', adminClassesReportController.getClassesReportJson);
 router.get('/classes/report/excel', adminClassesReportController.exportClassesReportExcel);

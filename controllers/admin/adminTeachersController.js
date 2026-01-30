@@ -1,61 +1,140 @@
+// controllers/admin/adminTeachersController.js
 const Enseignant = require('../../models/Enseignant');
-const { nanoid } = require('nanoid'); // Utilise la version 3.3.4 pour la compatibilité require [web:11]
+const User = require('../../models/User'); // adapte le chemin si besoin
+const { nanoid } = require('nanoid');
+const crypto = require('crypto');
+const {
+  sendUserWelcomeEmail,
+} = require('../../services/emailService'); // adapte le chemin
 
 /**
  * GET /api/admin/teachers
- * Récupère la liste des enseignants (filtrable par année scolaire)
  */
 exports.getTeachers = async (req, res, next) => {
   try {
-    const { anneeScolaire } = req.query;
+    const { anneeScolaire, statut, fonction } = req.query;
+
     const filter = {};
     if (anneeScolaire) filter.anneeScolaire = anneeScolaire;
+    if (statut) filter.statut = statut;
+    if (fonction) filter.fonction = fonction;
 
     const teachers = await Enseignant.find(filter).lean();
 
-    res.json({
+    return res.json({
       success: true,
       teachers,
     });
   } catch (err) {
-    next(err);
+    return next(err);
   }
 };
 
 /**
  * GET /api/admin/teachers/:id
- * Récupère un enseignant spécifique par son ID MongoDB
  */
 exports.getTeacherById = async (req, res, next) => {
   try {
     const teacher = await Enseignant.findById(req.params.id).lean();
+
     if (!teacher) {
-      return res.status(404).json({ success: false, message: 'Enseignant introuvable' });
+      return res
+        .status(404)
+        .json({ success: false, message: 'Enseignant introuvable' });
     }
-    res.json({ success: true, teacher });
+
+    return res.json({ success: true, teacher });
   } catch (err) {
-    next(err);
+    return next(err);
   }
 };
 
 /**
  * POST /api/admin/teachers
- * Crée un nouvel enseignant avec génération automatique de matricule
+ * - Crée l'enseignant
+ * - Crée un User (role teacher) si non fourni et si email inexistant
+ * - Réutilise le User existant si l'email existe déjà
+ * - Envoie l'email de bienvenue seulement en cas de nouveau User
  */
 exports.createTeacher = async (req, res, next) => {
   try {
     const payload = { ...req.body };
 
-    // Génération automatique du matricule si non fourni
-    // Format: T-XXXXX-YYY (T-5 derniers chiffres du timestamp-3 caractères aléatoires)
+    // Normaliser
+    if (payload.email) {
+      payload.email = String(payload.email).toLowerCase().trim();
+    }
+    if (payload.nom) payload.nom = String(payload.nom).toUpperCase().trim();
+    if (payload.postnom)
+      payload.postnom = String(payload.postnom).toUpperCase().trim();
+    if (payload.prenom)
+      payload.prenom = String(payload.prenom).toUpperCase().trim();
+
+    let userId = payload.user;
+
+    if (!userId) {
+      if (!payload.email) {
+        return res.status(400).json({
+          success: false,
+          message:
+            "L'email est requis pour créer un compte utilisateur enseignant.",
+        });
+      }
+
+      const fullName = [payload.nom, payload.postnom, payload.prenom]
+        .filter(Boolean)
+        .join(' ')
+        .trim();
+
+      const existingUser = await User.findOne({ email: payload.email }).lean();
+
+      if (existingUser) {
+        userId = existingUser._id;
+      } else {
+        // 🔐 Mot de passe basé sur le prénom: prenom123
+        const base =
+          (payload.prenom || fullName || 'prof')
+            .split(' ')[0]              // prendre le premier mot
+            .normalize('NFD')            // enlever accents
+            .replace(/[\u0300-\u036f]/g, '')
+            .toLowerCase();
+        const tempPassword = `${base}123`;
+
+        const user = await User.create({
+          fullName,
+          email: payload.email,
+          role: 'teacher',
+          password: tempPassword,  // hook Mongoose hash
+          isActive: true,
+        });
+
+        userId = user._id;
+
+        try {
+          await sendUserWelcomeEmail({
+            fullName: user.fullName,
+            email: user.email,
+            role: user.role,
+            tempPassword, // affiché dans le mail
+            // à toi d’ajouter dans emailService un BCC vers kutalagael2@gmail.com
+          });
+        } catch (mailErr) {
+          console.error('❌ Erreur envoi email enseignant:', mailErr);
+        }
+      }
+    }
+
+    payload.user = userId;
+
     if (!payload.matricule) {
       const timePart = Date.now().toString().slice(-5);
-      const randomPart = nanoid(3).toUpperCase(); // NanoID est plus robuste que shortid [web:5][web:11]
+      const randomPart = nanoid(3).toUpperCase();
       payload.matricule = `T-${timePart}-${randomPart}`;
     }
 
     const teacher = await Enseignant.create(payload);
-    res.status(201).json({ success: true, teacher });
+
+    return res.status(201).json({ success: true, teacher });
   } catch (err) {
     console.error('❌ Validation enseignant:', err.errors || err);
     return res.status(400).json({
@@ -66,9 +145,9 @@ exports.createTeacher = async (req, res, next) => {
   }
 };
 
+
 /**
  * PUT /api/admin/teachers/:id
- * Met à jour les informations d'un enseignant
  */
 exports.updateTeacher = async (req, res, next) => {
   try {
@@ -77,27 +156,35 @@ exports.updateTeacher = async (req, res, next) => {
       req.body,
       { new: true, runValidators: true }
     );
+
     if (!teacher) {
-      return res.status(404).json({ success: false, message: 'Enseignant introuvable' });
+      return res
+        .status(404)
+        .json({ success: false, message: 'Enseignant introuvable' });
     }
-    res.json({ success: true, teacher });
+
+    return res.json({ success: true, teacher });
   } catch (err) {
-    next(err);
+    console.error('❌ Erreur update enseignant:', err);
+    return next(err);
   }
 };
 
 /**
  * DELETE /api/admin/teachers/:id
- * Supprime un enseignant de la base de données
  */
 exports.deleteTeacher = async (req, res, next) => {
   try {
     const teacher = await Enseignant.findByIdAndDelete(req.params.id);
+
     if (!teacher) {
-      return res.status(404).json({ success: false, message: 'Enseignant introuvable' });
+      return res
+        .status(404)
+        .json({ success: false, message: 'Enseignant introuvable' });
     }
-    res.json({ success: true, message: 'Enseignant supprimé' });
+
+    return res.json({ success: true, message: 'Enseignant supprimé' });
   } catch (err) {
-    next(err);
+    return next(err);
   }
 };
