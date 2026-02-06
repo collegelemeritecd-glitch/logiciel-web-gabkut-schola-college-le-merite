@@ -37,11 +37,13 @@ exports.getBudgetParametres = async (req, res, next) => {
 
 /**
  * POST /api/comptable/budget-parametres
- * body: { lignes: [{ _id?, type, annee, anneeScolaire, categorie, mois, prevu, reel }] }
+ * body: { lignes: [{ _id?, type, annee, anneeScolaire, categorie, mois, prevu, reel, comptesPrefixes? }] }
  */
 exports.saveBudgetParametres = async (req, res, next) => {
   try {
     const { lignes } = req.body;
+
+    console.log("🟦 BACKEND saveBudgetParametres - lignes reçues:", lignes);
 
     if (!Array.isArray(lignes)) {
       return res.status(400).json({
@@ -67,19 +69,30 @@ exports.saveBudgetParametres = async (req, res, next) => {
       };
 
       if (!base.type || !base.annee || !base.anneeScolaire || !base.categorie) {
+        console.log("⚠️ Ligne ignorée (incomplète):", l);
         return;
       }
+
+      const comptesPrefixes = Array.isArray(l.comptesPrefixes)
+        ? l.comptesPrefixes.filter(
+            (c) => typeof c === "string" && c.trim() !== ""
+          )
+        : [];
 
       const update = {
         $set: {
           ...base,
           prevu,
           reel,
+          comptesPrefixes,
+          libelle: base.categorie,
+          montantPrevu: prevu,
+          montantReel: reel,
         },
       };
 
       if (l._id) {
-        // update par _id
+        console.log("📝 UPDATE par _id:", l._id, "=>", update.$set);
         ops.push({
           updateOne: {
             filter: { _id: l._id },
@@ -87,7 +100,12 @@ exports.saveBudgetParametres = async (req, res, next) => {
           },
         });
       } else {
-        // upsert par clé logique
+        console.log(
+          "🆕 UPSERT par clé logique:",
+          base,
+          "=>",
+          update.$set
+        );
         ops.push({
           updateOne: {
             filter: {
@@ -105,20 +123,22 @@ exports.saveBudgetParametres = async (req, res, next) => {
     });
 
     if (!ops.length) {
+      console.log("⚠️ Aucun op bulkWrite généré");
       return res.status(200).json({
         success: true,
         message: "Aucune ligne valide à enregistrer.",
       });
     }
 
-    await DepenseBudget.bulkWrite(ops);
+    const bulkResult = await DepenseBudget.bulkWrite(ops);
+    console.log("✅ bulkWrite DepenseBudget result:", bulkResult);
 
     return res.status(200).json({
       success: true,
       message: "Paramètres budget enregistrés avec succès.",
     });
   } catch (err) {
-    console.error("Erreur saveBudgetParametres:", err);
+    console.error("❌ Erreur saveBudgetParametres:", err);
     return next(err);
   }
 };
@@ -138,7 +158,55 @@ exports.getBudgetMensuel = async (req, res, next) => {
       mois,
     }).lean();
 
-    // 2) Réalisé à partir des écritures de trésorerie (classe 5)
+    // 2bis) Écritures du mois (toutes classes)
+    const ecrituresDuMois = await EcritureComptable.aggregate([
+      {
+        $match: {
+          dateOperation: { $gte: dateFrom, $lte: dateTo },
+        },
+      },
+      { $unwind: "$lignes" },
+      {
+        $project: {
+          compteNumero: "$lignes.compteNumero",
+          sens: "$lignes.sens",
+          montant: "$lignes.montant",
+          typeOperation: "$typeOperation",
+        },
+      },
+    ]);
+
+    // 3) Calcul du "réel" par ligne de budget à partir des comptesPrefixes
+    const lignesBudgetAvecReel = lignesBudget.map((l) => {
+      const prefixes = Array.isArray(l.comptesPrefixes) ? l.comptesPrefixes : [];
+
+      if (!prefixes.length) {
+        // si pas de mapping, on garde l'ancien montantReel ou 0
+        const reelAncien =
+          typeof l.reel === "number" ? l.reel : l.montantReel || 0;
+        return { ...l, reel: reelAncien };
+      }
+
+      let totalReel = 0;
+
+      ecrituresDuMois.forEach((e) => {
+        if (!e.compteNumero) return;
+        const match = prefixes.some((p) => e.compteNumero.startsWith(p));
+        if (!match) return;
+
+        // Logique par défaut : dépenses = crédits des comptes mappés
+        if (e.sens === "CREDIT") {
+          totalReel += e.montant || 0;
+        }
+      });
+
+      return {
+        ...l,
+        reel: totalReel,
+      };
+    });
+
+    // 4) Réalisé global trésorerie (classe 5) — code existant inchangé
     const regexTresorerie = /^5/;
 
     const stats = await EcritureComptable.aggregate([
@@ -168,7 +236,6 @@ exports.getBudgetMensuel = async (req, res, next) => {
       if (s._id === "CREDIT") totalDecaissements = s.total;
     });
 
-    // On peut aussi détailler par typeOperation si besoin
     const parType = await EcritureComptable.aggregate([
       {
         $match: {
@@ -210,7 +277,6 @@ exports.getBudgetMensuel = async (req, res, next) => {
       },
     ]);
 
-    // Mapping simple pour le front
     const recapTypes = parType.map((t) => ({
       typeOperation: t._id,
       encaissements: t.encaissements || 0,
@@ -224,7 +290,7 @@ exports.getBudgetMensuel = async (req, res, next) => {
       success: true,
       annee,
       mois,
-      budget: lignesBudget,
+      budget: lignesBudgetAvecReel,
       totalEncaissements,
       totalDecaissements,
       soldeMois,
