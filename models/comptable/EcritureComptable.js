@@ -1,6 +1,7 @@
 // ======================================================================
 // 📘 MODEL — Ecriture Comptable (Journal Général)
 // Collège Le Mérite — Gabkut-Schola PRO MAX 2038
+// models/comptable/EcritureComptable.js 
 // ======================================================================
 const mongoose = require("mongoose");
 const Compte = require("./Compte");
