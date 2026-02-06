@@ -10,6 +10,8 @@ const requireRole = require("../../middlewares/requireRole");
 
 const comptableController = require("../../controllers/comptable/comptableController");
 const comptableBudgetController = require("../../controllers/comptable/comptableBudgetController");
+const budgetAnnuelController = require("../../controllers/comptable/budgetAnnuelController");
+
 
 // Protection globale
 router.use(authMiddleware);
@@ -78,6 +80,40 @@ router.get(
   "/budget-mensuel",
   comptableBudgetController.getBudgetMensuel
 );
+
+// GET /api/comptable/budget-annuel?annee=2026
+router.get("/budget-annuel", budgetAnnuelController.getBudgetAnnuel);
+// Créances élèves (clients)
+router.get("/creances-eleves", comptableController.getCreancesEleves);
+
+router.get(
+  "/creances-eleves-export-excel",
+  comptableController.exportCreancesElevesExcel
+);
+
+// 📚 Classes (liste simple pour filtres comptables)
+router.get(
+  "/classes/liste-simples",
+  comptableController.getClassesSimples
+);
+
+router.get("/dettes-tiers", comptableController.getDettesTiers);
+router.get(
+  "/dettes-tiers-export-excel",
+  comptableController.exportDettesTiersExcel
+);
+
+// Trésorerie détaillée (caisse 571, banques 52x, virements 58)
+router.get(
+  "/tresorerie-detaillee",
+  comptableController.getTresorerieDetaillee
+);
+
+router.get(
+  "/tresorerie-detaillee-export-excel",
+  comptableController.exportTresorerieDetailleeExcel
+);
+
 
 module.exports = router;
 
