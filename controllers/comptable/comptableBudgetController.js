@@ -144,10 +144,11 @@ exports.saveBudgetParametres = async (req, res, next) => {
 };
 
 // GET /api/comptable/budget-mensuel?annee=2025&mois=1
+// GET /api/comptable/budget-mensuel?annee=2025&mois=1
 exports.getBudgetMensuel = async (req, res, next) => {
   try {
     const annee = parseInt(req.query.annee, 10) || new Date().getFullYear();
-    const mois = parseInt(req.query.mois, 10) || (new Date().getMonth() + 1); // 1-12
+    const mois = parseInt(req.query.mois, 10) || new Date().getMonth() + 1; // 1-12
 
     const dateFrom = new Date(annee, mois - 1, 1, 0, 0, 0, 0);
     const dateTo = new Date(annee, mois, 0, 23, 59, 59, 999);
@@ -158,7 +159,7 @@ exports.getBudgetMensuel = async (req, res, next) => {
       mois,
     }).lean();
 
-    // 2bis) Écritures du mois (toutes classes)
+    // 2) Écritures du mois (toutes classes)
     const ecrituresDuMois = await EcritureComptable.aggregate([
       {
         $match: {
@@ -206,7 +207,7 @@ exports.getBudgetMensuel = async (req, res, next) => {
       };
     });
 
-    // 4) Réalisé global trésorerie (classe 5) — code existant inchangé
+    // 4) Réalisé global trésorerie (classe 5)
     const regexTresorerie = /^5/;
 
     const stats = await EcritureComptable.aggregate([
@@ -301,3 +302,4 @@ exports.getBudgetMensuel = async (req, res, next) => {
     return next(err);
   }
 };
+

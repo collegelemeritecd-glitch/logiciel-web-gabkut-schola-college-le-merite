@@ -7,7 +7,7 @@ const EnseignantSchema = new mongoose.Schema(
     user: {
       type: mongoose.Schema.Types.ObjectId,
       ref: 'User',
-      required: true,
+      required: false, // on le remplit via seed
     },
 
     // Matricule interne prof (T-XXXXX-YYY)
@@ -117,6 +117,12 @@ const EnseignantSchema = new mongoose.Schema(
       enum: ['actif', 'inactif', 'congé'],
       default: 'actif',
       index: true,
+    },
+
+    // ✅ Nouveau : indique si cet enseignant est titulaire d'au moins une classe
+    isTitulaire: {
+      type: Boolean,
+      default: false,
     },
 
     // Année scolaire de référence (pour filtrer / historiser)

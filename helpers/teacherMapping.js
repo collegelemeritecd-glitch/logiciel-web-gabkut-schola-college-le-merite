@@ -39,15 +39,13 @@ const TEACHER_NAME_TO_EMAIL = {
   'Marcel': 'marcel@collegelemerite.school',
 
   // Primaire (COURS-ENSEIGNANTS-PRIMAIRE.xlsx)
-  // ➜ adapte les emails comme tu veux, l’important est la cohérence avec User
-  'CELESTIN MBAYA': 'celestin.mbaya@collegelemerite.school',     // 1ère Prim A
-  'WAGUMIA VICTORINE': 'wagumia.victorine@collegelemerite.school', // 1ère Prim B
-  'MBELU NGANDU ADA': 'mbelu.ngandu@collegelemerite.school',     // 2ème Prim
-  'JONAS KONGOLO': 'jonas.kongolo@collegelemerite.school',       // 3ème Prim
-  'RICHARD TSHIBANGU': 'richard.tshibangu@collegelemerite.school', // 4ème Prim
-  'MBUYI NGANDU MICHELLINE': 'mbuyi.ngandu@collegelemerite.school', // 5ème Prim
-  'GEDEON KABAMBA': 'gedeon.kabamba@collegelemerite.school', // 6ème Primaire
-  // ... ajoute ici l’instituteur de 6ème primaire si tu l’as dans le fichier
+  'CELESTIN MBAYA': 'celestin.mbaya@collegelemerite.school',
+  'WAGUMIA VICTORINE': 'wagumia.victorine@collegelemerite.school',
+  'MBELU NGANDU ADA': 'mbelu.ngandu@collegelemerite.school',
+  'JONAS KONGOLO': 'jonas.kongolo@collegelemerite.school',
+  'RICHARD TSHIBANGU': 'richard.tshibangu@collegelemerite.school',
+  'MBUYI NGANDU MICHELLINE': 'mbuyi.ngandu@collegelemerite.school',
+  'GEDEON KABAMBA': 'gedeon.kabamba@collegelemerite.school',
 };
 
 /* ============================================================
@@ -101,17 +99,19 @@ async function findClasseByName(rawClassName) {
 
   if (classeCache.has(raw)) return classeCache.get(raw);
 
-  // 1) tentative correspondance exacte sur "nom"
   let classe = await Classe.findOne({ nom: raw });
 
-  // 2) mapping Excel -> noms du seed si nécessaire
   if (!classe) {
     const upper = raw.toUpperCase();
 
     // ================= PRIMAIRE =================
-    // 1 PRIM A / 1 PRIM B / "Classe : 1ère année Primaire" => même classe Mongo
-    if (upper === '1 PRIM' || upper === '1 PRIM A' || upper === '1 PRIM B' ||
-        upper.includes('1ÈRE ANNÉE PRIMAIRE') || upper.includes('1ERE ANNEE PRIMAIRE')) {
+    if (
+      upper === '1 PRIM' ||
+      upper === '1 PRIM A' ||
+      upper === '1 PRIM B' ||
+      upper.includes('1ÈRE ANNÉE PRIMAIRE') ||
+      upper.includes('1ERE ANNEE PRIMAIRE')
+    ) {
       classe = await Classe.findOne({ nom: '1ère année Primaire' });
     } else if (upper === '2 PRIM' || upper.includes('2EME PRIMAIRE') || upper.includes('2ÈME PRIMAIRE')) {
       classe = await Classe.findOne({ nom: '2ème année Primaire' });
@@ -266,7 +266,7 @@ async function findClasseByName(rawClassName) {
       classe = await Classe.findOne({ nom: '4ème Mécanique Automobile' });
     }
 
-    // ================= CAS MIXTES (BALTHAZAR & CO) =================
+    // ================= CAS MIXTES =================
     if (!classe && (upper === '2È' || upper === '2E' || upper === '2E ')) {
       classe = await Classe.findOne({ nom: '2ème Mécanique Générale' });
     }
@@ -331,47 +331,38 @@ async function findClasseByName(rawClassName) {
 function inferOptionFromClassName(className) {
   const n = (className || '').toUpperCase();
 
-  // 7ème / 8ème = EB (Éducation de base)
   if (n.startsWith('7ÈME') || n.startsWith('7EME') || n.startsWith('8ÈME') || n.startsWith('8EME')) {
     return { optionCode: 'EB', optionLabel: 'Éducation de base (7ème-8ème)' };
   }
 
-  // Primaire
   if (n.includes('PRIMAIRE')) {
     return { optionCode: 'PRIM', optionLabel: 'Primaire' };
   }
 
-  // Maternelle
   if (n.includes('MATERNELLE')) {
     return { optionCode: 'MAT', optionLabel: 'Maternelle' };
   }
 
-  // Commerciale et gestion
   if (n.includes('COMMERCIALE') || n.includes('GESTION')) {
     return { optionCode: 'CG', optionLabel: 'Commerciale & Gestion' };
   }
 
-  // Scientifiques
   if (n.includes('SCIENTIFIQUE') || n.includes('SCIENTIFIQUES') || n.includes('SCIENCES')) {
     return { optionCode: 'SC', optionLabel: 'Scientifique' };
   }
 
-  // Pédagogie
   if (n.includes('PÉDAGOGIE') || n.includes('PEDAGOGIE') || n.includes('HUMANITÉ PÉDAGOGIQUE')) {
     return { optionCode: 'HP', optionLabel: 'Humanités pédagogiques' };
   }
 
-  // Coupe & couture
   if (n.includes('COUPE') || n.includes('COUTURE')) {
     return { optionCode: 'TCC', optionLabel: 'Coupe & Couture' };
   }
 
-  // Électricité
   if (n.includes('ÉLECTRICITÉ') || n.includes('ELECTRICITE')) {
     return { optionCode: 'EL', optionLabel: 'Électricité' };
   }
 
-  // Mécanique générale / automobile
   if (n.includes('MÉCANIQUE GÉNÉRALE') || n.includes('MECANIQUE GENERALE')) {
     return { optionCode: 'MG', optionLabel: 'Mécanique Générale' };
   }
@@ -379,22 +370,39 @@ function inferOptionFromClassName(className) {
     return { optionCode: 'MA', optionLabel: 'Mécanique Automobile' };
   }
 
-  // Littéraire
   if (n.includes('LITTÉRAIRE') || n.includes('LITTERAIRE')) {
     return { optionCode: 'LIT', optionLabel: 'Littéraire' };
   }
 
-  // Par défaut
   return { optionCode: 'GEN', optionLabel: 'Général' };
 }
 
+/* ============================================================
+   6️⃣ FONCTION: toutes les classes Collège d’un niveau (1,2,3,4)
+============================================================ */
+
+async function findCollegeClassesByYear(yearNumber) {
+  const all = await Classe.find({ niveau: 'Collège' }).lean();
+
+  const prefix =
+    yearNumber === 1 ? '1ère ' :
+    yearNumber === 2 ? '2ème ' :
+    yearNumber === 3 ? '3ème ' :
+    yearNumber === 4 ? '4ème ' :
+    '';
+
+  if (!prefix) return [];
+
+  return all.filter(c => (c.nom || '').startsWith(prefix));
+}
 
 /* ============================================================
-   6️⃣ EXPORTS
+   7️⃣ EXPORTS
 ============================================================ */
 
 module.exports = {
   findTeacherUserByName,
   findClasseByName,
   inferOptionFromClassName,
+  findCollegeClassesByYear,
 };

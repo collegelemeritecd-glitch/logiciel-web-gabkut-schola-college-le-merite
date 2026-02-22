@@ -3,8 +3,10 @@ const express = require('express');
 const router = express.Router();
 
 const publicVerificationController = require('../controllers/publicVerificationController');
+const publicNoticesController = require('../controllers/publicNoticesController');
 const Classe = require('../models/Classe');
 const Eleve = require('../models/Eleve'); // 🔹 on importe le modèle Eleve
+const publicTeachersController = require('../controllers/public/publicTeachersController');
 
 /**
  * 📌 VÉRIFICATION PUBLIQUE D’UN DOCUMENT
@@ -96,5 +98,14 @@ router.post(
   '/verif/:code/email',
   publicVerificationController.envoyerRapportParEmail
 );
+
+// Communiqués publics (lecture seule)
+router.get('/notices', publicNoticesController.getNotices);
+router.get('/notices/:id', publicNoticesController.getNoticeById);
+router.get('/teachers', publicTeachersController.getTeachers);
+// liste
+router.get('/teachers', publicTeachersController.getTeachers);
+// profil
+router.get('/teachers/:id', publicTeachersController.getTeacherById);
 
 module.exports = router;

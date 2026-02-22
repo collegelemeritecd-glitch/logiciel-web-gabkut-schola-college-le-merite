@@ -1,9 +1,7 @@
-// scripts/seed-teacher-courses.js
 /************************************************************
  📘 GABKUT SCHOLA — SEED TEACHER COURSES
  Collège Le Mérite - Backend Node.js
- - Importe ATRIBUTION-DES-COURS-PROF.xlsx (secondaire/technique)
- - Importe COURS-ENSEIGNANTS-PRIMAIRE.xlsx (primaire)
+ - Importe cours.xlsx (primaire + secondaire/technique)
  - Crée TeacherCourse par enseignant / classe / discipline
 *************************************************************/
 
@@ -17,12 +15,27 @@ const {
   findTeacherUserByName,
   findClasseByName,
   inferOptionFromClassName,
+  findCollegeClassesByYear,
 } = require('../helpers/teacherMapping');
 
 const MONGODB_URI = process.env.MONGODB_URI;
 const SCHOOL_YEAR = '2025-2026';
-const SCHOOL_ID = null; // si tu as un model School, tu peux le lier ici
+const SCHOOL_ID = null;
 
+/* ============================================================
+   🔧 SPLIT CLASSES: "1ère Littéraire, 1ère Scientifiques" → array
+============================================================ */
+function splitAndNormalizeClasses(raw) {
+  if (!raw) return [];
+  return String(raw)
+    .split(',')
+    .map(c => c.trim())
+    .filter(c => c.length > 0);
+}
+
+/* ============================================================
+   🔧 IMPORT (SECONDARY / PRIMARY MODE)
+============================================================ */
 async function importAttributionsFromFile(filePath, mode) {
   console.log('📄 Fichier:', filePath);
   const workbook = XLSX.readFile(filePath);
@@ -41,13 +54,13 @@ async function importAttributionsFromFile(filePath, mode) {
 
     console.log(`🔎 Lecture onglet: ${sheetName} (${rows.length} lignes)`);
 
-        let lastTeacherName = null;
+    let lastTeacherName = null;
     let lastClassName = null;
 
     for (const row of rows) {
       let teacherName;
       let discipline;
-      let className;
+      let classNameRaw;
 
       if (mode === 'SECONDARY') {
         const rawName = row.NOM || row.Nom || row.Prof || row.ENSEIGNANT;
@@ -60,25 +73,14 @@ async function importAttributionsFromFile(filePath, mode) {
         if (rawClass && String(rawClass).trim() !== '') {
           lastClassName = String(rawClass).trim();
         }
-        className = lastClassName;
+        classNameRaw = lastClassName;
 
         discipline =
           row.DISCIPLINE ||
           row.COURS ||
           row['COURS CLASSE'] ||
           row['COURS 1ere B'];
-     
-
-
-        className =
-          row.CLASSE ||
-          row['CLASSE'] ||
-          row['Classe'];
-
       } else if (mode === 'PRIMARY') {
-        // ====== FICHIER COURS-ENSEIGNANTS-PRIMAIRE.xlsx ======
-        // Chaque onglet = un instituteur + une classe (1ère, 2ème ...)
-        // Exemple de colonnes: "NOM POSTNOM PRENOM", "DISCIPLINE", "PONDERATION"...
         const rawName = row['NOM POSTNOM PRENOM'] || row.NOM || row.Nom;
         if (rawName && String(rawName).trim() !== '') {
           lastTeacherName = String(rawName).trim();
@@ -92,103 +94,163 @@ async function importAttributionsFromFile(filePath, mode) {
           row['COURS / 3eme'] ||
           row['COURS / 4eme'];
 
-        // Classe : on se base sur le nom de l’onglet
-        // ex: "CELESTIN MBAYA 1ERE PRIMAIRE"
         const upSheet = sheetName.toUpperCase();
         if (upSheet.includes('1ERE PRIMAIRE') || upSheet.includes('1ERE  PRIMAIRE')) {
-          className = '1 PRIM';
+          classNameRaw = '1 PRIM';
         } else if (upSheet.includes('2ÈME PRIMAIRE') || upSheet.includes('2EME PRIMAIRE')) {
-          className = '2 PRIM';
+          classNameRaw = '2 PRIM';
         } else if (upSheet.includes('3EME PRIMAIRE') || upSheet.includes('3ÈME PRIMAIRE')) {
-          className = '3 PRIM';
+          classNameRaw = '3 PRIM';
         } else if (upSheet.includes('4EME PRIMAIRE') || upSheet.includes('4ÈME PRIMAIRE')) {
-          className = '4 PRIM';
+          classNameRaw = '4 PRIM';
         } else if (upSheet.includes('5EME PRIMAIRE') || upSheet.includes('5ÈME PRIMAIRE')) {
-          className = '5 PRIM';
+          classNameRaw = '5 PRIM';
         } else if (upSheet.includes('6EME PRIMAIRE') || upSheet.includes('6ÈME PRIMAIRE')) {
-          className = '6 PRIM';
+          classNameRaw = '6 PRIM';
         }
       }
 
-      // Si toujours pas de prof ou pas de discipline/classe → on saute
-      if (!teacherName || !discipline || !className) {
+      if (!teacherName || !discipline || !classNameRaw) {
         continue;
       }
 
       const teacherUser = await findTeacherUserByName(teacherName);
       if (!teacherUser) continue;
 
-      const classe = await findClasseByName(className);
-      if (!classe) continue;
+      const classNameTrim = String(classNameRaw).trim();
+      const upClass = classNameTrim.toUpperCase();
 
-      const { optionCode, optionLabel } = inferOptionFromClassName(classe.nom || classe.name);
+      const isTous =
+        upClass.includes('TOUS') || upClass.includes('TOUTES');
 
-      const weight = row.PONDERATION || row['PONDERATION'] || 0;
+      // Gestion "TOUS" (1 TOUS, 2 TOUS...)
+      if (isTous && mode === 'SECONDARY') {
+        let yearNumber = null;
 
-      let periodsLabel = 'P1-P6 / EX';
-      const hasP1 = row.P1 || row['P1'] !== undefined;
-      if (hasP1) {
-        periodsLabel = 'P1-P6 / EX';
+        if (upClass.startsWith('1')) yearNumber = 1;
+        else if (upClass.startsWith('2')) yearNumber = 2;
+        else if (upClass.startsWith('3')) yearNumber = 3;
+        else if (upClass.startsWith('4')) yearNumber = 4;
+
+        if (!yearNumber) {
+          console.warn('⚠️ [SEED] Classe TOUS non reconnue:', classNameTrim);
+          continue;
+        }
+
+        const classesYear = await findCollegeClassesByYear(yearNumber);
+        if (!classesYear.length) {
+          console.warn('⚠️ [SEED] Aucune classe Collège trouvée pour niveau:', yearNumber);
+          continue;
+        }
+
+        const weight = row.PONDERATION || row['PONDERATION'] || 0;
+        const periodsLabel = 'P1-P6 / EX';
+
+        for (const classe of classesYear) {
+          const { optionCode, optionLabel } = inferOptionFromClassName(classe.nom || classe.name);
+
+          const filter = {
+            teacher: teacherUser._id,
+            classId: classe._id,
+            subjectName: String(discipline).trim(),
+            schoolYear: SCHOOL_YEAR,
+          };
+
+          const update = {
+            $set: {
+              teacher: teacherUser._id,
+              classId: classe._id,
+              className: classe.nom || classe.name || classNameTrim,
+              subjectName: String(discipline).trim(),
+              optionCode,
+              optionLabel,
+              weight: Number(weight) || 0,
+              periodsLabel,
+              schoolYear: SCHOOL_YEAR,
+              schoolId: SCHOOL_ID,
+            },
+          };
+
+          bulkOps.push({
+            updateOne: {
+              filter,
+              update,
+              upsert: true,
+            },
+          });
+
+          totalRecords++;
+        }
+
+        continue;
       }
 
-      const filter = {
-        teacher: teacherUser._id,
-        classId: classe._id,
-        subjectName: String(discipline).trim(),
-        schoolYear: SCHOOL_YEAR,
-      };
+      // Ici on peut avoir plusieurs classes séparées par virgule
+      const classesList = splitAndNormalizeClasses(classNameTrim);
 
-      const update = {
-        $set: {
+      for (const singleClass of classesList) {
+        const classe = await findClasseByName(singleClass);
+        if (!classe) continue;
+
+        const { optionCode, optionLabel } = inferOptionFromClassName(classe.nom || classe.name);
+        const weight = row.PONDERATION || row['PONDERATION'] || 0;
+        const periodsLabel = 'P1-P6 / EX';
+
+        const filter = {
           teacher: teacherUser._id,
           classId: classe._id,
-          className: classe.nom || classe.name || className,
           subjectName: String(discipline).trim(),
-          optionCode,
-          optionLabel,
-          weight: Number(weight) || 0,
-          periodsLabel,
           schoolYear: SCHOOL_YEAR,
-          schoolId: SCHOOL_ID,
-        },
-      };
+        };
 
-      bulkOps.push({
-        updateOne: {
-          filter,
-          update,
-          upsert: true,
-        },
-      });
+        const update = {
+          $set: {
+            teacher: teacherUser._id,
+            classId: classe._id,
+            className: classe.nom || classe.name || singleClass,
+            subjectName: String(discipline).trim(),
+            optionCode,
+            optionLabel,
+            weight: Number(weight) || 0,
+            periodsLabel,
+            schoolYear: SCHOOL_YEAR,
+            schoolId: SCHOOL_ID,
+          },
+        };
 
-      totalRecords++;
+        bulkOps.push({
+          updateOne: {
+            filter,
+            update,
+            upsert: true,
+          },
+        });
+
+        totalRecords++;
+      }
     }
   }
 
   return { totalRecords, bulkOps };
 }
 
+/* ============================================================
+   🚀 MAIN
+============================================================ */
 async function main() {
   try {
-    console.log('🌱 Seed TeacherCourse (primaire + secondaire)...');
+    console.log('🌱 Seed TeacherCourse (cours.xlsx unique)...');
     await mongoose.connect(MONGODB_URI);
     console.log('✅ MongoDB connecté');
 
-    const secondaryPath = path.join(__dirname, '..', 'data', 'ATRIBUTION-DES-COURS-PROF.xlsx');
-    const primaryPath = path.join(__dirname, '..', 'data', 'COURS-ENSEIGNANTS-PRIMAIRE.xlsx');
+    const secondaryPath = path.join(__dirname, '..', 'data', 'cours.xlsx');
 
     const allBulkOps = [];
     let grandTotal = 0;
 
-    // Secondaire / technique
     const sec = await importAttributionsFromFile(secondaryPath, 'SECONDARY');
     allBulkOps.push(...sec.bulkOps);
     grandTotal += sec.totalRecords;
-
-    // Primaire
-    const prim = await importAttributionsFromFile(primaryPath, 'PRIMARY');
-    allBulkOps.push(...prim.bulkOps);
-    grandTotal += prim.totalRecords;
 
     if (!allBulkOps.length) {
       console.log('⚠️ Aucun enregistrement trouvé à partir des Excel.');

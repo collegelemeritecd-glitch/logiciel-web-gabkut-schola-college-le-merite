@@ -1,3 +1,4 @@
+
 // ======================================================================
 // 🎛 CONTROLLER — Journal Comptable
 // ======================================================================
@@ -58,13 +59,16 @@ exports.creerEcriture = async (req, res) => {
       mapComptes[c.numero] = c.intitule;
     });
 
-    const lignesEnrichies = lignes.map((l) => ({
-      compteNumero: l.compteNumero,
-      compteIntitule: mapComptes[l.compteNumero] || "",
-      sens: l.sens,
-      montant: l.montant,
-      libelleLigne: l.libelleLigne || "",
-    }));
+    const lignesEnrichies = lignes.map((l) => {
+      const sensUpper = (l.sens || "").toString().trim().toUpperCase();
+      return {
+        compteNumero: l.compteNumero,
+        compteIntitule: mapComptes[l.compteNumero] || "",
+        sens: sensUpper === "DEBIT" ? "DEBIT" : "CREDIT",
+        montant: Number(l.montant) || 0,
+        libelleLigne: l.libelleLigne || "",
+      };
+    });
 
     const totalDebit = lignesEnrichies
       .filter((l) => l.sens === "DEBIT")
@@ -101,6 +105,7 @@ exports.creerEcriture = async (req, res) => {
     });
   }
 };
+
 
 /**
  * GET /api/comptable/ecritures?from=YYYY-MM-DD&to=YYYY-MM-DD
@@ -202,13 +207,16 @@ exports.mettreAJourEcriture = async (req, res) => {
       mapComptes[c.numero] = c.intitule;
     });
 
-    const lignesEnrichies = lignes.map((l) => ({
-      compteNumero: l.compteNumero,
-      compteIntitule: mapComptes[l.compteNumero] || "",
-      sens: l.sens,
-      montant: l.montant,
-      libelleLigne: l.libelleLigne || "",
-    }));
+    const lignesEnrichies = lignes.map((l) => {
+      const sensUpper = (l.sens || "").toString().trim().toUpperCase();
+      return {
+        compteNumero: l.compteNumero,
+        compteIntitule: mapComptes[l.compteNumero] || "",
+        sens: sensUpper === "DEBIT" ? "DEBIT" : "CREDIT",
+        montant: Number(l.montant) || 0,
+        libelleLigne: l.libelleLigne || "",
+      };
+    });
 
     const totalDebit = lignesEnrichies
       .filter((l) => l.sens === "DEBIT")
@@ -239,6 +247,7 @@ exports.mettreAJourEcriture = async (req, res) => {
     });
   }
 };
+
 
 /**
  * DELETE /api/comptable/ecritures/:id

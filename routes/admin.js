@@ -22,9 +22,19 @@ const adminFinanceHistoriqueController = require('../controllers/admin/adminFina
 const adminElevesAnalyseController = require('../controllers/admin/adminElevesAnalyseController');
 const adminClassesSegmentExportController = require('../controllers/admin/adminClassesSegmentExportController');
 const { envoyerMailsMobileMoney } = require('../controllers/adminMobileMoneyEmailsController');
-const adminTeachersController = require('../controllers/admin/adminTeachersController');
-const adminAttributionsController = require('../controllers/admin/adminAttributionsController');
 
+// Enseignants Gabkut Schola (modèle Enseignant)
+const adminTeachersController = require('../controllers/admin/adminTeachersController');
+
+// Enseignants PUBLIC (modèle Teacher) pour le site public
+const adminTeacherController = require('../controllers/adminTeacherController');
+
+const adminAttributionsController = require('../controllers/admin/adminAttributionsController');
+const adminNoticesController = require('../controllers/admin/adminNoticesController');
+
+// ➜ middleware upload (multer) pour images/vidéos de communiqués
+const uploadNotice = require('../middlewares/noticeUpload');
+const uploadTeacher = require('../middlewares/teacherUpload');
 
 // Protection globale
 router.use(authMiddleware);
@@ -38,13 +48,11 @@ router.use(requireRole(['admin']));
 router.get('/stats', adminStatsController.getStats);
 
 // Utilisateurs
-// routes/admin.js
 router.get('/users', adminUsersController.getUsers);
 router.post('/users', adminUsersController.createUser);
 router.put('/users/:id', adminUsersController.updateUser);
 router.put('/users/:id/status', adminUsersController.updateUserStatus);
 router.delete('/users/:id', adminUsersController.deleteUser);
-
 
 // Classes CRUD
 router.get('/classes', adminClassesController.getClasses);
@@ -53,23 +61,35 @@ router.post('/classes', adminClassesController.createClasse);
 router.put('/classes/:id', adminClassesController.updateClasse);
 router.delete('/classes/:id', adminClassesController.deleteClasse);
 
-// Enseignants CRUD 
-// Enseignants CRUD (PAS de /admin ici)
-// URL finale: /api/admin/teachers...
+/************************************************************
+ 👨‍🏫 ENSEIGNANTS
+*************************************************************/
+
+// 1) Enseignants Gabkut Schola (Enseignant) – RESTE sur /teachers
+//    utilisé par ton ancien panneau admin Gabkut
 router.get('/teachers', adminTeachersController.getTeachers);
 router.get('/teachers/:id', adminTeachersController.getTeacherById);
 router.post('/teachers', adminTeachersController.createTeacher);
 router.put('/teachers/:id', adminTeachersController.updateTeacher);
 router.delete('/teachers/:id', adminTeachersController.deleteTeacher);
 
+// 2) Enseignants PUBLIC (Teacher) – NOUVEAU préfixe /public-teachers
+//    utilisé par admin/public-teacher.html
+router.get('/public-teachers', adminTeacherController.getTeachers);
+router.get('/public-teachers/:id', adminTeacherController.getTeacherById);
+router.post('/public-teachers', adminTeacherController.createTeacher);
+router.put('/public-teachers/:id', adminTeacherController.updateTeacher);
+router.delete('/public-teachers/:id', adminTeacherController.deleteTeacher);
+
+/************************************************************
+ 📚 ATTRIBUTIONS
+*************************************************************/
+
 // Attributions de cours (URL finale: /api/admin/attributions...)
 router.get('/attributions', adminAttributionsController.getAttributions);
 router.post('/attributions', adminAttributionsController.createAttribution);
 router.put('/attributions/:id', adminAttributionsController.updateAttribution);
 router.delete('/attributions/:id', adminAttributionsController.deleteAttribution);
-// Rapport classes
-router.get('/classes/report', adminClassesReportController.getClassesReportJson);
-router.get('/classes/report/excel', adminClassesReportController.exportClassesReportExcel);
 
 /************************************************************
  📚 ÉLÈVES / STUDENTS CRUD
@@ -77,16 +97,12 @@ router.get('/classes/report/excel', adminClassesReportController.exportClassesRe
 
 // Liste + filtrage
 router.get('/students', adminStudentsController.getStudents);
-
 // Détail
 router.get('/students/:id', adminStudentsController.getStudentById);
-
 // Création
 router.post('/students', adminStudentsController.createStudent);
-
 // Mise à jour
 router.put('/students/:id', adminStudentsController.updateStudent);
-
 // Suppression
 router.delete('/students/:id', adminStudentsController.deleteStudent);
 
@@ -106,7 +122,7 @@ router.get('/activites', adminActivitesController.getActivites);
 /************************************************************
  📄 RAPPORTS & EXPORTS ADMIN
 *************************************************************/
-// routes/admin.js 
+
 // Exports finance
 router.get('/reports/finance/pdf', adminReportsController.exportFinancePdf);
 router.get('/reports/finance/excel', adminReportsController.exportFinanceExcel);
@@ -126,11 +142,56 @@ router.get(
   adminClassesSegmentExportController.exportClassesSegmentExcel
 );
 
-
-
 // Relance parents en retard
 router.post('/reports/relance-parents', adminReportsController.relanceParentsEnRetard);
 router.post('/paiements/mobile-money/envoyer-mails', envoyerMailsMobileMoney);
+
+/************************************************************
+ 📢 COMMUNIQUÉS (ADMIN + UPLOAD)
+*************************************************************/
+
+// CRUD communiqués (URL finale: /api/admin/notices...)
+router.get('/notices', adminNoticesController.getNotices);
+router.get('/notices/:id', adminNoticesController.getNoticeById);
+router.post('/notices', adminNoticesController.createNotice);
+router.put('/notices/:id', adminNoticesController.updateNotice);
+router.delete('/notices/:id', adminNoticesController.deleteNotice);
+
+// Upload d'un fichier lié à un communiqué (image ou vidéo)
+router.post(
+  '/notices/upload',
+  uploadNotice.single('file'), // champ "file" dans le form-data
+  (req, res) => {
+    if (!req.file) {
+      return res.status(400).json({ message: 'Aucun fichier reçu.' });
+    }
+
+    const relativePath = `/uploads/notices/${req.file.filename}`;
+
+    res.status(201).json({
+      message: 'Fichier uploadé avec succès.',
+      fileUrl: relativePath,
+    });
+  }
+);
+
+// Upload d'une photo d'enseignant (utilisé pour les deux types si tu veux)
+router.post(
+  '/teachers/upload',
+  uploadTeacher.single('file'), // champ "file" dans le form-data
+  (req, res) => {
+    if (!req.file) {
+      return res.status(400).json({ message: 'Aucun fichier reçu.' });
+    }
+
+    const relativePath = `/uploads/teachers/${req.file.filename}`;
+
+    res.status(201).json({
+      message: 'Photo uploadée avec succès.',
+      fileUrl: relativePath,
+    });
+  }
+);
 
 module.exports = router;
 

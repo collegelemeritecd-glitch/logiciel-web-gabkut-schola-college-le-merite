@@ -1,3 +1,4 @@
+// models/Classe.js
 const mongoose = require('mongoose');
 
 const ClasseSchema = new mongoose.Schema({
@@ -30,14 +31,22 @@ const ClasseSchema = new mongoose.Schema({
     type: Number,
     default: 0
   },
-  anneeScolaire: {
+    anneeScolaire: {
     type: String,
-    required: true
+    required: false, // ou tu supprimes carrément cette ligne "required"
   },
+
   isActive: {
     type: Boolean,
     default: true
-  }
+  },
+
+  // 🔗 Titulaire de la classe (enseignant → User)
+  titulaire: {
+    type: mongoose.Schema.Types.ObjectId,
+    ref: 'User',
+    default: null,
+  },
 }, {
   timestamps: true
 });

@@ -108,6 +108,8 @@ const classesRoutes = require('./routes/classesRoutes');
 const { authenticate } = require("./middlewares/auth");
 const percepteurProfilRoutes = require("./routes/percepteurProfilRoutes");
 console.log("✅ Routes Profil Percepteur chargées");
+const newsletterRoutes = require('./routes/newsletter');
+
 
 // ========== ROUTES API ==========
 
@@ -139,6 +141,8 @@ app.use('/api/comptable/immobilisations', immobilisationsRoutes);
 app.use('/api/teachers', teacherRoutes);
 app.use('/api/classes', classesRoutes);
 app.use('/api/teachers', teacherRoutes); // déjà en place
+app.use('/api', newsletterRoutes);
+app.use('/api/admin', require('./routes/adminUploadRoutes'));
 
 
 // Anciennes routes comptables (dashboard, etc.) ENSUITE

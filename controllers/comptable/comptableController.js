@@ -1,15 +1,98 @@
 /************************************************************
  📘 CONTROLLER COMPTABLE - GABKUT SCHOLA
+ controllers/comptableController.js 
 *************************************************************/
 
 const ExcelJS = require("exceljs");
 const EcritureComptable = require("../../models/comptable/EcritureComptable");
 const BalanceService = require("../../services/BalanceService");
-const DepenseBudget = require('../../models/DepenseBudget');
-const Eleve = require('../../models/Eleve');
-const Paiement = require('../../models/Paiement');
-const Classe = require('../../models/Classe');
+const DepenseBudget = require("../../models/DepenseBudget");
+const Eleve = require("../../models/Eleve");
+const Paiement = require("../../models/Paiement");
+const Classe = require("../../models/Classe");
 
+// 🔴 À AJOUTER POUR LA VERSION FUSIONNÉE DU BUDGET ANNUEL
+const {
+  calculerBudgetAnnuel,
+} = require("../../services/budgetAnnuelService");
+
+async function calculerBudgetAnnuelPedagogique({ anneeScolaire, annee, classeId }) {
+  const year = parseInt(annee, 10) || new Date().getFullYear();
+
+  // 1) Élèves actifs
+  const eleveFilter = {
+    statut: "actif",
+    anneeScolaire,
+  };
+  if (classeId) {
+    eleveFilter.classe = classeId;
+  }
+  const eleves = await Eleve.find(eleveFilter).populate("classe");
+
+  // 2) Attendu annuel
+  let attenduAnnuel = 0;
+  for (const eleve of eleves) {
+    if (eleve.classe && eleve.classe.montantFrais) {
+      attenduAnnuel += eleve.classe.montantFrais;
+    }
+  }
+
+  // 3) Paiements
+  const startYear = new Date(year, 0, 1, 0, 0, 0, 0);
+  const endYear = new Date(year, 11, 31, 23, 59, 59, 999);
+
+  const paiementFilter = {
+    statut: "validé",
+    anneeScolaire,
+    datePaiement: { $gte: startYear, $lte: endYear },
+  };
+  if (classeId) {
+    const elevesIds = eleves.map((e) => e._id);
+    paiementFilter.eleve = { $in: elevesIds };
+  }
+
+  const paiements = await Paiement.find(paiementFilter).lean();
+
+  const months = [
+    "Janvier", "Février", "Mars", "Avril",
+    "Mai", "Juin", "Juillet", "Août",
+    "Septembre", "Octobre", "Novembre", "Décembre",
+  ];
+
+  const recapMois = months.map((label, index) => ({
+    mois: index + 1,
+    label,
+    revenusPrevus: 0,
+    revenusReels: 0,
+  }));
+
+  const attenduMensuel = attenduAnnuel / 12;
+  recapMois.forEach((m) => {
+    m.revenusPrevus = attenduMensuel;
+  });
+
+  let totalPayeAnnuel = 0;
+  for (const p of paiements) {
+    if (!p.datePaiement) continue;
+    const d = new Date(p.datePaiement);
+    const mIndex = d.getMonth();
+    const montant = p.montant || 0;
+    totalPayeAnnuel += montant;
+    if (recapMois[mIndex]) {
+      recapMois[mIndex].revenusReels += montant;
+    }
+  }
+
+  return {
+    anneeScolaire,
+    annee: year,
+    attenduAnnuel,
+    totalRevenusReels: totalPayeAnnuel,
+    recapMois,
+  };
+}
+
+exports.calculerBudgetAnnuelPedagogique = calculerBudgetAnnuelPedagogique;
 
 /**
  * Outils internes : bornes de période
@@ -280,7 +363,6 @@ exports.exportDashboardExcel = async (req, res, next) => {
   try {
     const now = new Date();
 
-    // 🔹 NOUVEAU : mois sélectionné en query, sinon mois courant
     const moisQuery = req.query.mois;
 
     let moisFrom, moisTo;
@@ -290,7 +372,6 @@ exports.exportDashboardExcel = async (req, res, next) => {
       moisFrom = new Date(year, monthIndex, 1, 0, 0, 0, 0);
       moisTo = new Date(year, monthIndex + 1, 0, 23, 59, 59, 999);
     } else {
-      // ton code d’origine
       moisFrom = new Date(now.getFullYear(), now.getMonth(), 1, 0, 0, 0, 0);
       moisTo = new Date(
         now.getFullYear(),
@@ -311,21 +392,87 @@ exports.exportDashboardExcel = async (req, res, next) => {
       .sort({ dateOperation: 1 })
       .lean();
 
+    // ========================
+    //   PRÉ-CALCULS KPI
+    // ========================
+    let totalEncaissement = 0;
+    let totalDecaissement = 0;
+    let soldeCumul = 0;
+
+    // Pour analyse par jour et par type d'opération
+    const perDay = new Map(); // key: 'YYYY-MM-DD' -> { encaissement, decaissement }
+    const perType = new Map(); // key: typeOperation -> { encaissement, decaissement }
+
+    const lignesDashboard = [];
+
+    ecritures.forEach(e => {
+      const dateObj = e.dateOperation ? new Date(e.dateOperation) : null;
+      const dateStr = dateObj
+        ? dateObj.toLocaleDateString("fr-FR")
+        : "";
+      const dateKey = dateObj
+        ? dateObj.toISOString().substring(0, 10)
+        : "";
+
+      let encaissement = 0;
+      let decaissement = 0;
+
+      (e.lignes || []).forEach(l => {
+        if (!regexTresorerie.test(l.compteNumero || "")) return;
+        if (l.sens === "DEBIT") encaissement += l.montant || 0;
+        if (l.sens === "CREDIT") decaissement += l.montant || 0;
+      });
+
+      if (encaissement === 0 && decaissement === 0) {
+        return;
+      }
+
+      soldeCumul += encaissement - decaissement;
+      totalEncaissement += encaissement;
+      totalDecaissement += decaissement;
+
+      lignesDashboard.push({
+        dateStr,
+        dateKey,
+        typeOperation: e.typeOperation || "",
+        libelle: e.libelle || "",
+        reference: e.reference || "",
+        encaissement,
+        decaissement,
+        soldeCumul,
+      });
+
+      // Par jour
+      if (dateKey) {
+        if (!perDay.has(dateKey)) {
+          perDay.set(dateKey, { encaissement: 0, decaissement: 0 });
+        }
+        perDay.get(dateKey).encaissement += encaissement;
+        perDay.get(dateKey).decaissement += decaissement;
+      }
+
+      // Par type
+      const typeKey = e.typeOperation || "Autre";
+      if (!perType.has(typeKey)) {
+        perType.set(typeKey, { encaissement: 0, decaissement: 0 });
+      }
+      perType.get(typeKey).encaissement += encaissement;
+      perType.get(typeKey).decaissement += decaissement;
+    });
+
+    const soldeFinal = soldeCumul;
+    const variationNet = totalEncaissement - totalDecaissement;
+    const nbOperations = lignesDashboard.length;
+
+    // ========================
+    //   WORKBOOK
+    // ========================
     const workbook = new ExcelJS.Workbook();
     workbook.creator = "Gabkut Schola";
     workbook.lastModifiedBy = "Dashboard Comptable";
     workbook.created = now;
     workbook.modified = now;
     workbook.properties.date1904 = false;
-
-    const sheet = workbook.addWorksheet("Dashboard mensuel", {
-      views: [
-        {
-          state: "frozen",
-          ySplit: 4,
-        },
-      ],
-    });
 
     const headerFill = {
       type: "pattern",
@@ -344,6 +491,230 @@ exports.exportDashboardExcel = async (req, res, next) => {
       right: { style: "thin", color: { argb: "FF9CA3AF" } },
     };
 
+    const libelleMois = moisFrom.toLocaleDateString("fr-FR", {
+      month: "long",
+      year: "numeric",
+    });
+
+    // ========================
+    //   ONGLET 1 : SYNTHÈSE
+    // ========================
+    const synthese = workbook.addWorksheet("Synthèse mensuelle", {
+      views: [{ showGridLines: false }],
+    });
+
+    synthese.mergeCells("A1", "E1");
+    synthese.getCell("A1").value = "Dashboard Trésorerie - Collège Le Mérite";
+    synthese.getCell("A1").font = {
+      bold: true,
+      size: 16,
+      color: { argb: "FFFFFFFF" },
+    };
+    synthese.getCell("A1").alignment = {
+      vertical: "middle",
+      horizontal: "center",
+    };
+    synthese.getCell("A1").fill = titleFill;
+
+    synthese.mergeCells("A2", "E2");
+    synthese.getCell("A2").value = `Mois : ${libelleMois}`;
+    synthese.getCell("A2").font = {
+      bold: true,
+      size: 12,
+      color: { argb: "FFFFFFFF" },
+    };
+    synthese.getCell("A2").alignment = {
+      vertical: "middle",
+      horizontal: "center",
+    };
+    synthese.getCell("A2").fill = titleFill;
+
+    synthese.getRow(1).height = 24;
+    synthese.getRow(2).height = 20;
+
+    synthese.addRow([]);
+
+    const kpiRow = 4;
+    const formatUsd = (v) => (v == null ? "-" : `${v.toLocaleString("en-US", { minimumFractionDigits: 2, maximumFractionDigits: 2 })} USD`);
+
+    const kpis = [
+      {
+        label: "Encaissements",
+        value: formatUsd(totalEncaissement),
+        icon: "💰",
+        color: "FF16A34A",
+      },
+      {
+        label: "Décaissements",
+        value: formatUsd(totalDecaissement),
+        icon: "💸",
+        color: "FFDC2626",
+      },
+      {
+        label: "Variation nette",
+        value: formatUsd(variationNet),
+        icon: "📈",
+        color: variationNet >= 0 ? "FF2563EB" : "FFDC2626",
+      },
+      {
+        label: "Solde final",
+        value: formatUsd(soldeFinal),
+        icon: "🏦",
+        color: soldeFinal >= 0 ? "FF0EA5E9" : "FFDC2626",
+      },
+      {
+        label: "Opérations",
+        value: nbOperations,
+        icon: "📄",
+        color: "FF4B5563",
+      },
+    ];
+
+    kpis.forEach((kpi, idx) => {
+      const col = String.fromCharCode(65 + idx); // A..E
+
+      const iconCell = synthese.getCell(`${col}${kpiRow}`);
+      iconCell.value = kpi.icon;
+      iconCell.font = { size: 20 };
+      iconCell.alignment = { horizontal: "center", vertical: "middle" };
+
+      const valueCell = synthese.getCell(`${col}${kpiRow + 1}`);
+      valueCell.value = kpi.value;
+      valueCell.font = {
+        size: 14,
+        bold: true,
+        color: { argb: "FFFFFFFF" },
+      };
+      valueCell.alignment = { horizontal: "center", vertical: "middle" };
+      valueCell.fill = {
+        type: "pattern",
+        pattern: "solid",
+        fgColor: { argb: kpi.color },
+      };
+
+      const labelCell = synthese.getCell(`${col}${kpiRow + 2}`);
+      labelCell.value = kpi.label;
+      labelCell.font = { size: 10, bold: true };
+      labelCell.alignment = { horizontal: "center", vertical: "middle" };
+      labelCell.fill = {
+        type: "pattern",
+        pattern: "solid",
+        fgColor: { argb: "FFF3F4F6" },
+      };
+
+      synthese.getColumn(col).width = 18;
+    });
+
+    synthese.getRow(kpiRow).height = 28;
+    synthese.getRow(kpiRow + 1).height = 34;
+    synthese.getRow(kpiRow + 2).height = 22;
+
+    // Bloc analyse par type
+    let rowStartType = kpiRow + 5;
+    synthese.mergeCells(`A${rowStartType}`, `E${rowStartType}`);
+    const typeTitle = synthese.getCell(`A${rowStartType}`);
+    typeTitle.value = "Analyse par type d'opération";
+    typeTitle.font = {
+      size: 13,
+      bold: true,
+      color: { argb: "FFFFFFFF" },
+    };
+    typeTitle.alignment = { horizontal: "center", vertical: "middle" };
+    typeTitle.fill = {
+      type: "pattern",
+      pattern: "solid",
+      fgColor: { argb: "FF1F2937" },
+    };
+    synthese.getRow(rowStartType).height = 22;
+
+    rowStartType++;
+
+    const headerType = synthese.getRow(rowStartType);
+    headerType.values = [
+      "Type d'opération",
+      "Encaissements (USD)",
+      "Décaissements (USD)",
+      "Net (USD)",
+      "% sur encaissements",
+    ];
+    headerType.eachCell(cell => {
+      cell.font = { bold: true, color: { argb: "FF111827" }, size: 11 };
+      cell.alignment = { horizontal: "center", vertical: "middle" };
+      cell.fill = headerFill;
+      cell.border = borderThin;
+    });
+    synthese.getRow(rowStartType).height = 20;
+    synthese.getColumn(1).width = 30;
+    synthese.getColumn(2).width = 20;
+    synthese.getColumn(3).width = 20;
+    synthese.getColumn(4).width = 18;
+    synthese.getColumn(5).width = 22;
+
+    let iType = 0;
+    perType.forEach((val, typeKey) => {
+      const net = val.encaissement - val.decaissement;
+      const pourc =
+        totalEncaissement > 0
+          ? `${((val.encaissement / totalEncaissement) * 100).toFixed(1)} %`
+          : "-";
+
+      const row = synthese.addRow([
+        typeKey,
+        val.encaissement,
+        val.decaissement,
+        net,
+        pourc,
+      ]);
+      iType++;
+
+      const bgColor = iType % 2 === 0 ? "FFFFFFFF" : "FFF9FAFB";
+
+      row.eachCell((cell, col) => {
+        cell.fill = {
+          type: "pattern",
+          pattern: "solid",
+          fgColor: { argb: bgColor },
+        };
+        cell.border = borderThin;
+        cell.alignment = {
+          vertical: "middle",
+          horizontal: col === 1 ? "left" : "right",
+        };
+        if (col >= 2 && col <= 4) {
+          cell.numFmt = '#,##0.00" USD"';
+        }
+      });
+      row.height = 18;
+    });
+
+    synthese.addRow([]);
+    const noteSynth = synthese.addRow([
+      `Remarque : seules les opérations impactant les comptes de trésorerie (classe 5) ont été prises en compte.`,
+    ]);
+    synthese.mergeCells(noteSynth.number, 1, noteSynth.number, 5);
+    noteSynth.getCell(1).font = {
+      italic: true,
+      size: 10,
+      color: { argb: "FF6B7280" },
+    };
+    noteSynth.getCell(1).alignment = {
+      horizontal: "left",
+      vertical: "middle",
+      wrapText: true,
+    };
+
+    // ========================
+    //   ONGLET 2 : DÉTAIL
+    // ========================
+    const sheet = workbook.addWorksheet("Détails opérations", {
+      views: [
+        {
+          state: "frozen",
+          ySplit: 4,
+        },
+      ],
+    });
+
     sheet.mergeCells("A1", "G1");
     sheet.getCell("A1").value = "Dashboard Trésorerie - Collège Le Mérite";
     sheet.getCell("A1").font = {
@@ -356,12 +727,6 @@ exports.exportDashboardExcel = async (req, res, next) => {
       horizontal: "center",
     };
     sheet.getCell("A1").fill = titleFill;
-
-    // ↪ on affiche le mois réellement exporté
-    const libelleMois = moisFrom.toLocaleDateString("fr-FR", {
-      month: "long",
-      year: "numeric",
-    });
 
     sheet.mergeCells("A2", "G2");
     sheet.getCell("A2").value = `Mois : ${libelleMois}`;
@@ -378,7 +743,6 @@ exports.exportDashboardExcel = async (req, res, next) => {
 
     sheet.getRow(1).height = 24;
     sheet.getRow(2).height = 20;
-
     sheet.addRow([]);
 
     sheet.columns = [
@@ -411,8 +775,7 @@ exports.exportDashboardExcel = async (req, res, next) => {
     headerRow.alignment = { horizontal: "center", vertical: "middle" };
     headerRow.fill = headerFill;
     headerRow.height = 18;
-
-    headerRow.eachCell((cell) => {
+    headerRow.eachCell(cell => {
       cell.border = borderThin;
     });
 
@@ -421,36 +784,15 @@ exports.exportDashboardExcel = async (req, res, next) => {
       to: "G4",
     };
 
-    let soldeCumul = 0;
-    let totalEncaissement = 0;
-    let totalDecaissement = 0;
-
-    ecritures.forEach((e) => {
-      const dateStr = e.dateOperation
-        ? new Date(e.dateOperation).toLocaleDateString("fr-FR")
-        : "";
-
-      let encaissement = 0;
-      let decaissement = 0;
-
-      (e.lignes || []).forEach((l) => {
-        if (!regexTresorerie.test(l.compteNumero || "")) return;
-        if (l.sens === "DEBIT") encaissement += l.montant || 0;
-        if (l.sens === "CREDIT") decaissement += l.montant || 0;
-      });
-
-      soldeCumul += encaissement - decaissement;
-      totalEncaissement += encaissement;
-      totalDecaissement += decaissement;
-
+    lignesDashboard.forEach(ld => {
       const row = sheet.addRow({
-        date: dateStr,
-        typeOperation: e.typeOperation || "",
-        libelle: e.libelle || "",
-        reference: e.reference || "",
-        encaissement,
-        decaissement,
-        soldeCumul,
+        date: ld.dateStr,
+        typeOperation: ld.typeOperation,
+        libelle: ld.libelle,
+        reference: ld.reference,
+        encaissement: ld.encaissement,
+        decaissement: ld.decaissement,
+        soldeCumul: ld.soldeCumul,
       });
 
       row.eachCell((cell, colNumber) => {
@@ -472,7 +814,7 @@ exports.exportDashboardExcel = async (req, res, next) => {
       reference: "Totaux",
       encaissement: totalEncaissement,
       decaissement: totalDecaissement,
-      soldeCumul: soldeCumul,
+      soldeCumul: soldeFinal,
     });
 
     totalRow.font = { bold: true, color: { argb: "FF111827" } };
@@ -509,6 +851,124 @@ exports.exportDashboardExcel = async (req, res, next) => {
       sheet.getRow(i).height = 16;
     }
 
+    // ========================
+    //   ONGLET 3 : PAR JOUR
+    // ========================
+    const jourSheet = workbook.addWorksheet("Analyse par jour");
+
+    jourSheet.mergeCells("A1", "D1");
+    jourSheet.getCell("A1").value = "Flux de trésorerie par jour";
+    jourSheet.getCell("A1").font = {
+      bold: true,
+      size: 14,
+      color: { argb: "FFFFFFFF" },
+    };
+    jourSheet.getCell("A1").alignment = {
+      vertical: "middle",
+      horizontal: "center",
+    };
+    jourSheet.getCell("A1").fill = titleFill;
+    jourSheet.getRow(1).height = 22;
+
+    jourSheet.addRow([]);
+
+    const headerJour = jourSheet.addRow([
+      "Date",
+      "Encaissement (USD)",
+      "Décaissement (USD)",
+      "Net (USD)",
+    ]);
+    headerJour.eachCell(cell => {
+      cell.font = { bold: true, color: { argb: "FF111827" } };
+      cell.alignment = { horizontal: "center", vertical: "middle" };
+      cell.fill = headerFill;
+      cell.border = borderThin;
+    });
+    jourSheet.getRow(3).height = 20;
+    jourSheet.getColumn(1).width = 14;
+    jourSheet.getColumn(2).width = 20;
+    jourSheet.getColumn(3).width = 20;
+    jourSheet.getColumn(4).width = 18;
+
+    const sortedDays = Array.from(perDay.entries()).sort(
+      (a, b) => new Date(a[0]) - new Date(b[0])
+    );
+
+    sortedDays.forEach(([dateKey, val], idx) => {
+      const net = val.encaissement - val.decaissement;
+      const row = jourSheet.addRow([
+        new Date(dateKey).toLocaleDateString("fr-FR"),
+        val.encaissement,
+        val.decaissement,
+        net,
+      ]);
+
+      const bgColor = idx % 2 === 0 ? "FFFFFFFF" : "FFF9FAFB";
+
+      row.eachCell((cell, col) => {
+        cell.fill = {
+          type: "pattern",
+          pattern: "solid",
+          fgColor: { argb: bgColor },
+        };
+        cell.border = borderThin;
+        cell.alignment = {
+          vertical: "middle",
+          horizontal: col === 1 ? "center" : "right",
+        };
+        if (col >= 2) {
+          cell.numFmt = '#,##0.00" USD"';
+        }
+      });
+      row.height = 18;
+    });
+
+    // ========================
+    //   ONGLET 4 : LÉGENDE
+    // ========================
+    const legend = workbook.addWorksheet("Légende", {
+      views: [{ showGridLines: false }],
+    });
+
+    legend.mergeCells("A1:D1");
+    const lTitle = legend.getCell("A1");
+    lTitle.value = "LÉGENDE ET LECTURE DU DASHBOARD";
+    lTitle.font = { size: 16, bold: true, color: { argb: "FFFFFFFF" } };
+    lTitle.alignment = { horizontal: "center", vertical: "middle" };
+    lTitle.fill = titleFill;
+    legend.getRow(1).height = 32;
+
+    legend.addRow([]);
+    legend.addRow(["Élément", "Description", "", ""]);
+    legend.getRow(3).font = { bold: true };
+    legend.getRow(3).height = 22;
+
+    const legendRows = [
+      ["Encaissements", "Montants entrants sur les comptes de trésorerie (classe 5)."],
+      ["Décaissements", "Montants sortants depuis les comptes de trésorerie (classe 5)."],
+      ["Variation nette", "Encaissements - Décaissements sur la période."],
+      ["Solde final", "Solde de trésorerie à la fin du mois."],
+      ["Analyse par type", "Répartition des flux par type d'opération (inscriptions, frais, etc.)."],
+      ["Analyse par jour", "Suivi quotidien des encaissements/décaissements et du net."],
+    ];
+
+    legendRows.forEach(item => {
+      const row = legend.addRow([item[0], item[1], "", ""]);
+      row.height = 20;
+      row.eachCell(cell => {
+        cell.border = borderThin;
+        cell.alignment = { horizontal: "left", vertical: "middle", wrapText: true };
+      });
+    });
+
+    legend.getColumn(1).width = 25;
+    legend.getColumn(2).width = 70;
+    legend.getColumn(3).width = 5;
+    legend.getColumn(4).width = 5;
+
+    // ========================
+    //   EXPORT
+    // ========================
     const fileName = `dashboard_tresorerie_${moisFrom
       .toISOString()
       .substring(0, 7)}.xlsx`;
@@ -791,7 +1251,9 @@ exports.exportGrandLivreExcel = async (req, res, next) => {
     const toDate = new Date(to);
     toDate.setHours(23, 59, 59, 999);
 
-    // Même logique que getGrandLivre : soldes avant + mouvements
+    // ========================
+    //   SOLDES AVANT PÉRIODE
+    // ========================
     const soldesAvant = await EcritureComptable.aggregate([
       {
         $match: {
@@ -840,6 +1302,9 @@ exports.exportGrandLivreExcel = async (req, res, next) => {
       });
     });
 
+    // ========================
+    //   MOUVEMENTS PÉRIODE
+    // ========================
     const lignes = await EcritureComptable.aggregate([
       {
         $match: {
@@ -862,49 +1327,33 @@ exports.exportGrandLivreExcel = async (req, res, next) => {
       { $sort: { compteNumero: 1, date: 1, reference: 1 } },
     ]);
 
-    const workbook = new ExcelJS.Workbook();
-    const sheet = workbook.addWorksheet("Grand Livre");
-
-    sheet.mergeCells("A1", "H1");
-    sheet.getCell("A1").value = "Grand Livre Comptable - Collège Le Mérite";
-    sheet.getCell("A1").font = { bold: true, size: 14 };
-    sheet.getCell("A1").alignment = {
-      horizontal: "center",
-      vertical: "middle",
-    };
-
-    sheet.mergeCells("A2", "H2");
-    sheet.getCell("A2").value = `Période du ${fromDate.toLocaleDateString(
-      "fr-FR"
-    )} au ${toDate.toLocaleDateString("fr-FR")}`;
-    sheet.getCell("A2").alignment = {
-      horizontal: "center",
-      vertical: "middle",
-    };
-
-    sheet.addRow([]);
-
-    sheet.columns = [
-      { header: "Compte", key: "compte", width: 12 },
-      { header: "Intitulé", key: "intitule", width: 28 },
-      { header: "Date", key: "date", width: 12 },
-      { header: "Référence", key: "reference", width: 16 },
-      { header: "Libellé", key: "libelle", width: 40 },
-      { header: "Sens", key: "sens", width: 10 },
-      { header: "Montant (USD)", key: "montant", width: 16 },
-      { header: "Type", key: "type", width: 16 }, // Ouverture / Mouvement
-    ];
-
-    // Ligne d'en-tête
-    sheet.getRow(4).font = { bold: true };
-
-    // 1) Écrire pour chaque compte : ligne de solde d'ouverture puis mouvements
+    // ========================
+    //   PRÉ-CALCULS KPI
+    // ========================
     const comptesMap = new Map();
+    let totalDebitPeriode = 0;
+    let totalCreditPeriode = 0;
+
     lignes.forEach((l) => {
       if (!comptesMap.has(l.compteNumero)) {
-        comptesMap.set(l.compteNumero, []);
+        comptesMap.set(l.compteNumero, {
+          numero: l.compteNumero,
+          intitule: l.compteIntitule || "",
+          mouvements: [],
+          totalDebit: 0,
+          totalCredit: 0,
+        });
       }
-      comptesMap.get(l.compteNumero).push(l);
+      const compte = comptesMap.get(l.compteNumero);
+      compte.mouvements.push(l);
+
+      if (l.sens === "DEBIT") {
+        compte.totalDebit += l.montant || 0;
+        totalDebitPeriode += l.montant || 0;
+      } else if (l.sens === "CREDIT") {
+        compte.totalCredit += l.montant || 0;
+        totalCreditPeriode += l.montant || 0;
+      }
     });
 
     const tousComptes = new Set([
@@ -916,54 +1365,700 @@ exports.exportGrandLivreExcel = async (req, res, next) => {
       a.localeCompare(b)
     );
 
+    const nbComptes = comptesTries.length;
+    const nbMouvements = lignes.length;
+
+    // Calcul soldes cloture
+    const statsComptes = [];
     comptesTries.forEach((numero) => {
       const infoAvant = mapAvant.get(numero);
-      const mouvements = comptesMap.get(numero) || [];
+      const compteData = comptesMap.get(numero);
+
+      const soldeOuverture = infoAvant ? infoAvant.soldeOuverture : 0;
+      const intitule = (infoAvant && infoAvant.intitule) || (compteData && compteData.intitule) || "";
+      
+      const debitPeriode = compteData ? compteData.totalDebit : 0;
+      const creditPeriode = compteData ? compteData.totalCredit : 0;
+      const soldeCloture = soldeOuverture + debitPeriode - creditPeriode;
+
+      statsComptes.push({
+        numero,
+        intitule,
+        soldeOuverture,
+        debitPeriode,
+        creditPeriode,
+        soldeCloture,
+      });
+    });
+
+    // ========================
+    //   WORKBOOK
+    // ========================
+    const workbook = new ExcelJS.Workbook();
+    workbook.creator = "Gabkut Schola";
+    workbook.lastModifiedBy = "Grand Livre Comptable";
+    workbook.created = new Date();
+    workbook.modified = new Date();
+
+    const titleFill = {
+      type: "pattern",
+      pattern: "solid",
+      fgColor: { argb: "FF111827" },
+    };
+    const headerFill = {
+      type: "pattern",
+      pattern: "solid",
+      fgColor: { argb: "FFE5E7EB" },
+    };
+    const borderThin = {
+      top: { style: "thin", color: { argb: "FF9CA3AF" } },
+      left: { style: "thin", color: { argb: "FF9CA3AF" } },
+      bottom: { style: "thin", color: { argb: "FF9CA3AF" } },
+      right: { style: "thin", color: { argb: "FF9CA3AF" } },
+    };
+
+    const periodLabel = `${fromDate.toLocaleDateString("fr-FR")} au ${toDate.toLocaleDateString("fr-FR")}`;
+    const formatUsd = (v) => (v == null ? "-" : `${v.toLocaleString("en-US", { minimumFractionDigits: 2, maximumFractionDigits: 2 })} USD`);
+
+    // ========================
+    //   ONGLET 1 : SYNTHÈSE
+    // ========================
+    const synthese = workbook.addWorksheet("Synthèse", {
+      views: [{ showGridLines: false }],
+    });
+
+    synthese.mergeCells("A1", "E1");
+    synthese.getCell("A1").value = "Grand Livre Comptable - Collège Le Mérite";
+    synthese.getCell("A1").font = {
+      bold: true,
+      size: 16,
+      color: { argb: "FFFFFFFF" },
+    };
+    synthese.getCell("A1").alignment = {
+      horizontal: "center",
+      vertical: "middle",
+    };
+    synthese.getCell("A1").fill = titleFill;
+
+    synthese.mergeCells("A2", "E2");
+    synthese.getCell("A2").value = `Période : ${periodLabel}`;
+    synthese.getCell("A2").font = {
+      bold: true,
+      size: 12,
+      color: { argb: "FFFFFFFF" },
+    };
+    synthese.getCell("A2").alignment = {
+      horizontal: "center",
+      vertical: "middle",
+    };
+    synthese.getCell("A2").fill = titleFill;
+
+    synthese.getRow(1).height = 24;
+    synthese.getRow(2).height = 20;
+
+    synthese.addRow([]);
+
+    // KPI Cards
+    const kpiRow = 4;
+    const kpis = [
+      { label: "Comptes", value: nbComptes, icon: "📖", color: "FF4B5563" },
+      { label: "Mouvements", value: nbMouvements, icon: "📝", color: "FF6366F1" },
+      {
+        label: "Total Débit",
+        value: formatUsd(totalDebitPeriode),
+        icon: "💚",
+        color: "FF16A34A",
+      },
+      {
+        label: "Total Crédit",
+        value: formatUsd(totalCreditPeriode),
+        icon: "❤️",
+        color: "FFDC2626",
+      },
+      {
+        label: "Équilibre",
+        value: formatUsd(totalDebitPeriode - totalCreditPeriode),
+        icon: "⚖️",
+        color: Math.abs(totalDebitPeriode - totalCreditPeriode) < 0.01 ? "FF16A34A" : "FFDC2626",
+      },
+    ];
+
+    kpis.forEach((kpi, idx) => {
+      const col = String.fromCharCode(65 + idx);
+
+      const iconCell = synthese.getCell(`${col}${kpiRow}`);
+      iconCell.value = kpi.icon;
+      iconCell.font = { size: 22 };
+      iconCell.alignment = { horizontal: "center", vertical: "middle" };
+
+      const valueCell = synthese.getCell(`${col}${kpiRow + 1}`);
+      valueCell.value = kpi.value;
+      valueCell.font = {
+        size: 13,
+        bold: true,
+        color: { argb: "FFFFFFFF" },
+      };
+      valueCell.alignment = {
+        horizontal: "center",
+        vertical: "middle",
+        wrapText: true,
+      };
+      valueCell.fill = {
+        type: "pattern",
+        pattern: "solid",
+        fgColor: { argb: kpi.color },
+      };
+
+      const labelCell = synthese.getCell(`${col}${kpiRow + 2}`);
+      labelCell.value = kpi.label;
+      labelCell.font = { size: 10, bold: true };
+      labelCell.alignment = { horizontal: "center", vertical: "middle" };
+      labelCell.fill = {
+        type: "pattern",
+        pattern: "solid",
+        fgColor: { argb: "FFF3F4F6" },
+      };
+
+      synthese.getColumn(col).width = 18;
+    });
+
+    synthese.getRow(kpiRow).height = 28;
+    synthese.getRow(kpiRow + 1).height = 36;
+    synthese.getRow(kpiRow + 2).height = 22;
+
+    // Bloc sommaire par classe de compte
+    const rowSommaireStart = kpiRow + 5;
+    synthese.mergeCells(`A${rowSommaireStart}`, `E${rowSommaireStart}`);
+    const sommaireTitle = synthese.getCell(`A${rowSommaireStart}`);
+    sommaireTitle.value = "Sommaire par classe de compte";
+    sommaireTitle.font = {
+      size: 13,
+      bold: true,
+      color: { argb: "FFFFFFFF" },
+    };
+    sommaireTitle.alignment = { horizontal: "center", vertical: "middle" };
+    sommaireTitle.fill = {
+      type: "pattern",
+      pattern: "solid",
+      fgColor: { argb: "FF1F2937" },
+    };
+    synthese.getRow(rowSommaireStart).height = 22;
+
+    const headerSommaire = synthese.getRow(rowSommaireStart + 1);
+    headerSommaire.values = [
+      "Classe",
+      "Nb comptes",
+      "Total Débit (USD)",
+      "Total Crédit (USD)",
+      "Solde net (USD)",
+    ];
+    headerSommaire.eachCell((cell) => {
+      cell.font = { bold: true, color: { argb: "FF111827" }, size: 11 };
+      cell.alignment = { horizontal: "center", vertical: "middle" };
+      cell.fill = headerFill;
+      cell.border = borderThin;
+    });
+    synthese.getRow(rowSommaireStart + 1).height = 20;
+
+    synthese.getColumn(1).width = 20;
+    synthese.getColumn(2).width = 14;
+    synthese.getColumn(3).width = 18;
+    synthese.getColumn(4).width = 18;
+    synthese.getColumn(5).width = 18;
+
+    // Agrégation par classe (premier chiffre)
+    const classeMap = new Map();
+    statsComptes.forEach((sc) => {
+      const classe = sc.numero.charAt(0);
+      if (!classeMap.has(classe)) {
+        classeMap.set(classe, {
+          classe,
+          nbComptes: 0,
+          totalDebit: 0,
+          totalCredit: 0,
+        });
+      }
+      const c = classeMap.get(classe);
+      c.nbComptes++;
+      c.totalDebit += sc.debitPeriode;
+      c.totalCredit += sc.creditPeriode;
+    });
+
+    const classesLabels = {
+      "1": "Classe 1 - Capitaux",
+      "2": "Classe 2 - Immobilisations",
+      "3": "Classe 3 - Stocks",
+      "4": "Classe 4 - Tiers",
+      "5": "Classe 5 - Trésorerie",
+      "6": "Classe 6 - Charges",
+      "7": "Classe 7 - Produits",
+      "8": "Classe 8 - Autres",
+    };
+
+    let iClasse = 0;
+    Array.from(classeMap.entries())
+      .sort((a, b) => a[0].localeCompare(b[0]))
+      .forEach(([classe, data]) => {
+        const soldeNet = data.totalDebit - data.totalCredit;
+        const row = synthese.addRow([
+          classesLabels[classe] || `Classe ${classe}`,
+          data.nbComptes,
+          data.totalDebit,
+          data.totalCredit,
+          soldeNet,
+        ]);
+
+        iClasse++;
+        const bgColor = iClasse % 2 === 0 ? "FFFFFFFF" : "FFF9FAFB";
+
+        row.eachCell((cell, col) => {
+          cell.fill = {
+            type: "pattern",
+            pattern: "solid",
+            fgColor: { argb: bgColor },
+          };
+          cell.border = borderThin;
+          cell.alignment = {
+            vertical: "middle",
+            horizontal: col === 1 ? "left" : "right",
+          };
+          if (col >= 3) {
+            cell.numFmt = '#,##0.00" USD"';
+          }
+        });
+        row.height = 20;
+      });
+
+    synthese.addRow([]);
+    const noteSynth = synthese.addRow([
+      "Remarque : Le solde net par classe = Total Débit - Total Crédit. L'équilibre global doit être proche de zéro.",
+    ]);
+    synthese.mergeCells(noteSynth.number, 1, noteSynth.number, 5);
+    noteSynth.getCell(1).font = {
+      italic: true,
+      size: 10,
+      color: { argb: "FF6B7280" },
+    };
+    noteSynth.getCell(1).alignment = {
+      horizontal: "left",
+      vertical: "middle",
+      wrapText: true,
+    };
+
+    // ========================
+    //   ONGLET 2 : GRAND LIVRE DÉTAILLÉ
+    // ========================
+    const sheet = workbook.addWorksheet("Grand Livre Détaillé", {
+      views: [
+        {
+          state: "frozen",
+          ySplit: 4,
+        },
+      ],
+    });
+
+    sheet.mergeCells("A1", "H1");
+    sheet.getCell("A1").value = "Grand Livre Comptable - Collège Le Mérite";
+    sheet.getCell("A1").font = {
+      bold: true,
+      size: 14,
+      color: { argb: "FFFFFFFF" },
+    };
+    sheet.getCell("A1").alignment = {
+      horizontal: "center",
+      vertical: "middle",
+    };
+    sheet.getCell("A1").fill = titleFill;
+
+    sheet.mergeCells("A2", "H2");
+    sheet.getCell("A2").value = `Période : ${periodLabel}`;
+    sheet.getCell("A2").font = {
+      bold: true,
+      size: 11,
+      color: { argb: "FFFFFFFF" },
+    };
+    sheet.getCell("A2").alignment = {
+      horizontal: "center",
+      vertical: "middle",
+    };
+    sheet.getCell("A2").fill = titleFill;
+
+    sheet.getRow(1).height = 22;
+    sheet.getRow(2).height = 18;
+
+    sheet.addRow([]);
+
+    sheet.columns = [
+      { header: "Compte", key: "compte", width: 12 },
+      { header: "Intitulé", key: "intitule", width: 28 },
+      { header: "Date", key: "date", width: 12 },
+      { header: "Référence", key: "reference", width: 16 },
+      { header: "Libellé", key: "libelle", width: 40 },
+      { header: "Sens", key: "sens", width: 10 },
+      { header: "Montant (USD)", key: "montant", width: 16 },
+      { header: "Type", key: "type", width: 16 },
+    ];
+
+    const headerRow = sheet.getRow(4);
+    headerRow.font = { bold: true, color: { argb: "FF111827" } };
+    headerRow.alignment = { horizontal: "center", vertical: "middle" };
+    headerRow.fill = headerFill;
+    headerRow.height = 18;
+    headerRow.eachCell((cell) => {
+      cell.border = borderThin;
+    });
+
+    sheet.autoFilter = {
+      from: "A4",
+      to: "H4",
+    };
+
+    // Écriture par compte
+    comptesTries.forEach((numero) => {
+      const infoAvant = mapAvant.get(numero);
+      const compteData = comptesMap.get(numero);
+      const mouvements = compteData ? compteData.mouvements : [];
 
       const intitule =
         (infoAvant && infoAvant.intitule) ||
-        (mouvements[0] && mouvements[0].compteIntitule) ||
+        (compteData && compteData.intitule) ||
         "";
 
-      // Ligne solde ouverture si non nul
-if (infoAvant && infoAvant.soldeOuverture !== 0) {
-  const sensOuverture =
-    infoAvant.soldeOuverture >= 0 ? "DEBIT" : "CREDIT";
-  const montantOuverture = Math.abs(infoAvant.soldeOuverture);
+      // Ligne solde ouverture
+      if (infoAvant && infoAvant.soldeOuverture !== 0) {
+        const sensOuverture =
+          infoAvant.soldeOuverture >= 0 ? "DEBIT" : "CREDIT";
+        const montantOuverture = Math.abs(infoAvant.soldeOuverture);
 
-  sheet.addRow({
-    compte: numero,
-    intitule,
-    date: "",
-    reference: "SOLDE OUVERTURE",
-    libelle: "Solde antérieur",
-    sens: sensOuverture,
-    montant: montantOuverture,
-    type: "Ouverture",
-  });
-}
+        const rowOpen = sheet.addRow({
+          compte: numero,
+          intitule,
+          date: "",
+          reference: "SOLDE OUVERTURE",
+          libelle: "Solde antérieur à la période",
+          sens: sensOuverture,
+          montant: montantOuverture,
+          type: "Ouverture",
+        });
 
+        rowOpen.eachCell((cell, colNumber) => {
+          cell.border = borderThin;
+          cell.alignment = {
+            vertical: "middle",
+            horizontal:
+              colNumber >= 7 ? "right" : colNumber === 1 ? "center" : "left",
+          };
+          cell.fill = {
+            type: "pattern",
+            pattern: "solid",
+            fgColor: { argb: "FFFEF3C7" }, // Jaune clair
+          };
+          cell.font = { bold: true, color: { argb: "FF92400E" } };
+        });
+        rowOpen.height = 18;
+      }
 
-      // Mouvements de la période
+      // Mouvements
       mouvements.forEach((l) => {
-        sheet.addRow({
+        const rowMvt = sheet.addRow({
           compte: l.compteNumero,
           intitule: l.compteIntitule || intitule,
-          date: l.date
-            ? new Date(l.date).toLocaleDateString("fr-FR")
-            : "",
+          date: l.date ? new Date(l.date).toLocaleDateString("fr-FR") : "",
           reference: l.reference || "",
           libelle: l.libelle || "",
           sens: l.sens || "",
           montant: l.montant || 0,
           type: "Mouvement",
         });
+
+        rowMvt.eachCell((cell, colNumber) => {
+          cell.border = borderThin;
+          cell.alignment = {
+            vertical: "middle",
+            horizontal:
+              colNumber >= 7 ? "right" : colNumber === 1 ? "center" : "left",
+          };
+          if (colNumber === 7) {
+            cell.numFmt = '#,##0.00" USD"';
+          }
+
+          // Couleur selon sens
+          if (colNumber === 6 || colNumber === 7) {
+            if (l.sens === "DEBIT") {
+              cell.font = { color: { argb: "FF16A34A" }, bold: true };
+            } else if (l.sens === "CREDIT") {
+              cell.font = { color: { argb: "FFDC2626" }, bold: true };
+            }
+          }
+        });
+        rowMvt.height = 16;
       });
 
-      // Ligne vide de séparation
+      // Ligne de séparation
       sheet.addRow({});
     });
 
+    // ========================
+    //   ONGLET 3 : BALANCE DES COMPTES
+    // ========================
+    const balance = workbook.addWorksheet("Balance des Comptes");
+
+    balance.mergeCells("A1", "F1");
+    balance.getCell("A1").value = "Balance des Comptes";
+    balance.getCell("A1").font = {
+      bold: true,
+      size: 14,
+      color: { argb: "FFFFFFFF" },
+    };
+    balance.getCell("A1").alignment = {
+      horizontal: "center",
+      vertical: "middle",
+    };
+    balance.getCell("A1").fill = titleFill;
+    balance.getRow(1).height = 22;
+
+    balance.mergeCells("A2", "F2");
+    balance.getCell("A2").value = `Période : ${periodLabel}`;
+    balance.getCell("A2").font = {
+      bold: true,
+      size: 11,
+      color: { argb: "FFFFFFFF" },
+    };
+    balance.getCell("A2").alignment = {
+      horizontal: "center",
+      vertical: "middle",
+    };
+    balance.getCell("A2").fill = titleFill;
+    balance.getRow(2).height = 18;
+
+    balance.addRow([]);
+
+    const headerBalance = balance.addRow([
+      "Compte",
+      "Intitulé",
+      "Solde Ouverture",
+      "Débit Période",
+      "Crédit Période",
+      "Solde Clôture",
+    ]);
+
+    headerBalance.eachCell((cell) => {
+      cell.font = { bold: true, color: { argb: "FF111827" }, size: 11 };
+      cell.alignment = { horizontal: "center", vertical: "middle" };
+      cell.fill = headerFill;
+      cell.border = borderThin;
+    });
+    balance.getRow(4).height = 20;
+
+    balance.getColumn(1).width = 12;
+    balance.getColumn(2).width = 32;
+    balance.getColumn(3).width = 18;
+    balance.getColumn(4).width = 18;
+    balance.getColumn(5).width = 18;
+    balance.getColumn(6).width = 18;
+
+    let iBalance = 0;
+    statsComptes.forEach((sc) => {
+      const row = balance.addRow([
+        sc.numero,
+        sc.intitule,
+        sc.soldeOuverture,
+        sc.debitPeriode,
+        sc.creditPeriode,
+        sc.soldeCloture,
+      ]);
+
+      iBalance++;
+      const bgColor = iBalance % 2 === 0 ? "FFFFFFFF" : "FFF9FAFB";
+
+      row.eachCell((cell, col) => {
+        cell.fill = {
+          type: "pattern",
+          pattern: "solid",
+          fgColor: { argb: bgColor },
+        };
+        cell.border = borderThin;
+        cell.alignment = {
+          vertical: "middle",
+          horizontal: col <= 2 ? (col === 1 ? "center" : "left") : "right",
+        };
+        if (col >= 3) {
+          cell.numFmt = '#,##0.00" USD"';
+        }
+
+        // Couleur solde de clôture
+        if (col === 6) {
+          const val = sc.soldeCloture;
+          if (val > 0) {
+            cell.font = { color: { argb: "FF16A34A" }, bold: true };
+          } else if (val < 0) {
+            cell.font = { color: { argb: "FFDC2626" }, bold: true };
+          }
+        }
+      });
+      row.height = 18;
+    });
+
+    // Ligne de totaux
+    const totalSoldeOuverture = statsComptes.reduce(
+      (acc, s) => acc + s.soldeOuverture,
+      0
+    );
+    const totalDebitPer = statsComptes.reduce(
+      (acc, s) => acc + s.debitPeriode,
+      0
+    );
+    const totalCreditPer = statsComptes.reduce(
+      (acc, s) => acc + s.creditPeriode,
+      0
+    );
+    const totalSoldeCloture = statsComptes.reduce(
+      (acc, s) => acc + s.soldeCloture,
+      0
+    );
+
+    const totalRow = balance.addRow([
+      "",
+      "TOTAUX",
+      totalSoldeOuverture,
+      totalDebitPer,
+      totalCreditPer,
+      totalSoldeCloture,
+    ]);
+
+    totalRow.font = { bold: true, color: { argb: "FF111827" } };
+    totalRow.eachCell((cell, col) => {
+      cell.border = borderThin;
+      cell.fill = {
+        type: "pattern",
+        pattern: "solid",
+        fgColor: { argb: "FFD1FAE5" },
+      };
+      cell.alignment = {
+        vertical: "middle",
+        horizontal: col <= 2 ? "right" : "right",
+      };
+      if (col >= 3) {
+        cell.numFmt = '#,##0.00" USD"';
+      }
+    });
+
+    // ========================
+    //   ONGLET 4 : LÉGENDE
+    // ========================
+    const legend = workbook.addWorksheet("Légende", {
+      views: [{ showGridLines: false }],
+    });
+
+    legend.mergeCells("A1:D1");
+    const lTitle = legend.getCell("A1");
+    lTitle.value = "LÉGENDE ET LECTURE DU GRAND LIVRE";
+    lTitle.font = { size: 16, bold: true, color: { argb: "FFFFFFFF" } };
+    lTitle.alignment = { horizontal: "center", vertical: "middle" };
+    lTitle.fill = titleFill;
+    legend.getRow(1).height = 32;
+
+    legend.addRow([]);
+    legend.addRow(["Élément", "Description", "", ""]);
+    legend.getRow(3).font = { bold: true };
+    legend.getRow(3).height = 22;
+
+    const legendRows = [
+      [
+        "Synthèse",
+        "Vue d'ensemble avec KPI et sommaire par classe de compte.",
+      ],
+      [
+        "Grand Livre Détaillé",
+        "Liste complète des mouvements par compte avec solde d'ouverture.",
+      ],
+      [
+        "Balance des Comptes",
+        "Tableau récapitulatif : solde d'ouverture, mouvements, solde de clôture par compte.",
+      ],
+      [
+        "Solde Ouverture",
+        "Solde du compte au début de la période sélectionnée (mouvements antérieurs).",
+      ],
+      [
+        "Débit",
+        "Mouvement augmentant le solde du compte (affiché en vert).",
+      ],
+      [
+        "Crédit",
+        "Mouvement diminuant le solde du compte (affiché en rouge).",
+      ],
+      [
+        "Solde Clôture",
+        "Solde Ouverture + Débit Période - Crédit Période.",
+      ],
+      [
+        "Équilibre",
+        "Total Débit = Total Crédit sur l'ensemble des mouvements (principe de la comptabilité en partie double).",
+      ],
+    ];
+
+    legendRows.forEach((item) => {
+      const row = legend.addRow([item[0], item[1], "", ""]);
+      row.height = 22;
+      row.eachCell((cell) => {
+        cell.border = borderThin;
+        cell.alignment = {
+          horizontal: "left",
+          vertical: "middle",
+          wrapText: true,
+        };
+      });
+    });
+
+    legend.getColumn(1).width = 25;
+    legend.getColumn(2).width = 70;
+    legend.getColumn(3).width = 5;
+    legend.getColumn(4).width = 5;
+
+    legend.addRow([]);
+    legend.addRow([]);
+    legend.mergeCells("A" + legend.rowCount + ":D" + legend.rowCount);
+    const instrTitle = legend.getCell("A" + legend.rowCount);
+    instrTitle.value = "📋 CONSEILS D'UTILISATION";
+    instrTitle.font = {
+      size: 14,
+      bold: true,
+      color: { argb: "FFFFFFFF" },
+    };
+    instrTitle.alignment = { horizontal: "center", vertical: "middle" };
+    instrTitle.fill = {
+      type: "pattern",
+      pattern: "solid",
+      fgColor: { argb: "FF3498DB" },
+    };
+    legend.getRow(legend.rowCount).height = 28;
+
+    const instructions = [
+      "• Utilisez l'onglet Synthèse pour une vue rapide des KPI et de la répartition par classe.",
+      "• Consultez le Grand Livre Détaillé pour l'analyse ligne par ligne de chaque compte.",
+      "• La Balance des Comptes vous permet de vérifier rapidement les soldes d'ouverture et de clôture.",
+      "• Les couleurs aident à identifier rapidement les débits (vert) et crédits (rouge).",
+      "• Le solde de clôture positif indique un solde débiteur, négatif un solde créditeur.",
+    ];
+
+    instructions.forEach((text) => {
+      legend.addRow([]);
+      legend.mergeCells("A" + legend.rowCount + ":D" + legend.rowCount);
+      const cell = legend.getCell("A" + legend.rowCount);
+      cell.value = text;
+      cell.font = { size: 11 };
+      cell.alignment = {
+        horizontal: "left",
+        vertical: "middle",
+        wrapText: true,
+      };
+      legend.getRow(legend.rowCount).height = 20;
+    });
+
+    // ========================
+    //   EXPORT
+    // ========================
     const fileName = `grand_livre_${fromDate
       .toISOString()
       .substring(0, 10)}_${toDate.toISOString().substring(0, 10)}.xlsx`;
@@ -1343,7 +2438,7 @@ exports.exportBalanceGeneraleExcel = async (req, res, next) => {
       });
     });
 
-    // 3) Fusion
+    // 3) Fusion et calcul des soldes
     const tousNumeros = new Set([
       ...Array.from(mapAvant.keys()),
       ...Array.from(mapPeriode.keys()),
@@ -1394,34 +2489,227 @@ exports.exportBalanceGeneraleExcel = async (req, res, next) => {
       })
       .sort((a, b) => a.numero.localeCompare(b.numero));
 
-    // 4) Excel
+    const nbComptes = comptes.length;
+    const desequilibre = totalDebit - totalCredit;
+
+    // 4) Excel avancé
     const workbook = new ExcelJS.Workbook();
-    const sheet = workbook.addWorksheet("Balance générale");
+    workbook.creator = "Gabkut Schola";
+    workbook.lastModifiedBy = "Balance Générale";
+    workbook.created = new Date();
+    workbook.modified = new Date();
 
-    sheet.mergeCells("A1", "F1");
-    sheet.getCell("A1").value = "Balance comptable - Collège Le Mérite";
-    sheet.getCell("A1").font = { bold: true, size: 14 };
-    sheet.getCell("A1").alignment = { horizontal: "center" };
-
-    sheet.mergeCells("A2", "F2");
-    sheet.getCell("A2").value = `Période du ${fromDate.toLocaleDateString(
+    const titleFill = {
+      type: "pattern",
+      pattern: "solid",
+      fgColor: { argb: "FF111827" },
+    };
+    const headerFill = {
+      type: "pattern",
+      pattern: "solid",
+      fgColor: { argb: "FFE5E7EB" },
+    };
+    const borderThin = {
+      top: { style: "thin", color: { argb: "FF9CA3AF" } },
+      left: { style: "thin", color: { argb: "FF9CA3AF" } },
+      bottom: { style: "thin", color: { argb: "FF9CA3AF" } },
+      right: { style: "thin", color: { argb: "FF9CA3AF" } },
+    };
+    const periodLabel = `du ${fromDate.toLocaleDateString(
       "fr-FR"
     )} au ${toDate.toLocaleDateString("fr-FR")}`;
-    sheet.getCell("A2").alignment = { horizontal: "center" };
+    const formatUsd = (v) =>
+      v == null
+        ? "-"
+        : `${v.toLocaleString("en-US", {
+            minimumFractionDigits: 2,
+            maximumFractionDigits: 2,
+          })} USD`;
 
+    // =====================
+    // ONGLET 1 : SYNTHÈSE
+    // =====================
+    const synthese = workbook.addWorksheet("Synthèse", {
+      views: [{ showGridLines: false }],
+    });
+
+    synthese.mergeCells("A1", "E1");
+    synthese.getCell("A1").value =
+      "Balance générale - Collège Le Mérite";
+    synthese.getCell("A1").font = {
+      bold: true,
+      size: 16,
+      color: { argb: "FFFFFFFF" },
+    };
+    synthese.getCell("A1").alignment = {
+      horizontal: "center",
+      vertical: "middle",
+    };
+    synthese.getCell("A1").fill = titleFill;
+
+    synthese.mergeCells("A2", "E2");
+    synthese.getCell("A2").value = `Période ${periodLabel}`;
+    synthese.getCell("A2").font = {
+      bold: true,
+      size: 12,
+      color: { argb: "FFFFFFFF" },
+    };
+    synthese.getCell("A2").alignment = {
+      horizontal: "center",
+      vertical: "middle",
+    };
+    synthese.getCell("A2").fill = titleFill;
+
+    synthese.getRow(1).height = 24;
+    synthese.getRow(2).height = 20;
+    synthese.addRow([]);
+
+    const kpiRow = 4;
+    const kpis = [
+      { label: "Nombre de comptes", value: nbComptes, icon: "📘", color: "FF4B5563" },
+      { label: "Total Débit", value: formatUsd(totalDebit), icon: "💚", color: "FF16A34A" },
+      { label: "Total Crédit", value: formatUsd(totalCredit), icon: "❤️", color: "FFDC2626" },
+      {
+        label: "Somme soldes Débiteurs",
+        value: formatUsd(totalSoldesDebiteurs),
+        icon: "⬆️",
+        color: "FF0EA5E9",
+      },
+      {
+        label: "Somme soldes Créditeurs",
+        value: formatUsd(totalSoldesCrediteurs),
+        icon: "⬇️",
+        color: "FF6366F1",
+      },
+    ];
+
+    kpis.forEach((kpi, idx) => {
+      const col = String.fromCharCode(65 + idx);
+
+      const iconCell = synthese.getCell(`${col}${kpiRow}`);
+      iconCell.value = kpi.icon;
+      iconCell.font = { size: 20 };
+      iconCell.alignment = { horizontal: "center", vertical: "middle" };
+
+      const valueCell = synthese.getCell(`${col}${kpiRow + 1}`);
+      valueCell.value = kpi.value;
+      valueCell.font = {
+        size: 13,
+        bold: true,
+        color: { argb: "FFFFFFFF" },
+      };
+      valueCell.alignment = {
+        horizontal: "center",
+        vertical: "middle",
+        wrapText: true,
+      };
+      valueCell.fill = {
+        type: "pattern",
+        pattern: "solid",
+        fgColor: { argb: kpi.color },
+      };
+
+      const labelCell = synthese.getCell(`${col}${kpiRow + 2}`);
+      labelCell.value = kpi.label;
+      labelCell.font = { size: 10, bold: true };
+      labelCell.alignment = { horizontal: "center", vertical: "middle" };
+      labelCell.fill = {
+        type: "pattern",
+        pattern: "solid",
+        fgColor: { argb: "FFF3F4F6" },
+      };
+
+      synthese.getColumn(col).width = 20;
+    });
+
+    synthese.getRow(kpiRow).height = 28;
+    synthese.getRow(kpiRow + 1).height = 34;
+    synthese.getRow(kpiRow + 2).height = 22;
+
+    const rowEqui = kpiRow + 4;
+    synthese.mergeCells(`A${rowEqui}:E${rowEqui}`);
+    const equiCell = synthese.getCell(`A${rowEqui}`);
+    equiCell.value = `Équilibre global (Débit - Crédit) : ${formatUsd(
+      desequilibre
+    )}`;
+    equiCell.font = {
+      size: 12,
+      bold: true,
+      color: { argb: "FFFFFFFF" },
+    };
+    equiCell.alignment = { horizontal: "center", vertical: "middle" };
+    equiCell.fill = {
+      type: "pattern",
+      pattern: "solid",
+      fgColor:
+        Math.abs(desequilibre) < 0.01 ? "FF16A34A" : "FFDC2626",
+    };
+    synthese.getRow(rowEqui).height = 22;
+
+    // =====================
+    // ONGLET 2 : BALANCE
+    // =====================
+    const sheet = workbook.addWorksheet("Balance générale", {
+      views: [{ state: "frozen", ySplit: 4 }],
+    });
+
+    sheet.mergeCells("A1", "F1");
+    sheet.getCell("A1").value =
+      "Balance comptable - Collège Le Mérite";
+    sheet.getCell("A1").font = {
+      bold: true,
+      size: 14,
+      color: { argb: "FFFFFFFF" },
+    };
+    sheet.getCell("A1").alignment = {
+      horizontal: "center",
+      vertical: "middle",
+    };
+    sheet.getCell("A1").fill = titleFill;
+
+    sheet.mergeCells("A2", "F2");
+    sheet.getCell("A2").value = `Période ${periodLabel}`;
+    sheet.getCell("A2").font = {
+      bold: true,
+      size: 11,
+      color: { argb: "FFFFFFFF" },
+    };
+    sheet.getCell("A2").alignment = {
+      horizontal: "center",
+      vertical: "middle",
+    };
+    sheet.getCell("A2").fill = titleFill;
+
+    sheet.getRow(1).height = 22;
+    sheet.getRow(2).height = 18;
     sheet.addRow([]);
 
     sheet.columns = [
       { header: "N° compte", key: "numero", width: 12 },
-      { header: "Intitulé", key: "intitule", width: 30 },
+      { header: "Intitulé", key: "intitule", width: 32 },
       { header: "Total débit (USD)", key: "totalDebit", width: 18 },
       { header: "Total crédit (USD)", key: "totalCredit", width: 18 },
       { header: "Solde débiteur (USD)", key: "soldeDebiteur", width: 20 },
       { header: "Solde créditeur (USD)", key: "soldeCrediteur", width: 20 },
     ];
 
+    const headerRow = sheet.getRow(4);
+    headerRow.font = { bold: true, color: { argb: "FF111827" }, size: 11 };
+    headerRow.alignment = { horizontal: "center", vertical: "middle" };
+    headerRow.fill = headerFill;
+    headerRow.height = 20;
+    headerRow.eachCell((cell) => {
+      cell.border = borderThin;
+    });
+
+    sheet.autoFilter = {
+      from: "A4",
+      to: "F4",
+    };
+
+    let iRow = 0;
     comptes.forEach((c) => {
-      sheet.addRow({
+      const row = sheet.addRow({
         numero: c.numero,
         intitule: c.intitule,
         totalDebit: c.totalDebit,
@@ -1429,6 +2717,35 @@ exports.exportBalanceGeneraleExcel = async (req, res, next) => {
         soldeDebiteur: c.soldeDebiteur,
         soldeCrediteur: c.soldeCrediteur,
       });
+      iRow++;
+
+      const bgColor = iRow % 2 === 0 ? "FFFFFFFF" : "FFF9FAFB";
+
+      row.eachCell((cell, col) => {
+        cell.fill = {
+          type: "pattern",
+          pattern: "solid",
+          fgColor: { argb: bgColor },
+        };
+        cell.border = borderThin;
+        cell.alignment = {
+          vertical: "middle",
+          horizontal:
+            col === 1 ? "center" : col === 2 ? "left" : "right",
+        };
+        if (col >= 3) {
+          cell.numFmt = '#,##0.00" USD"';
+        }
+
+        // Colorer soldes
+        if (col === 5 && c.soldeDebiteur > 0) {
+          cell.font = { color: { argb: "FF16A34A" }, bold: true };
+        }
+        if (col === 6 && c.soldeCrediteur > 0) {
+          cell.font = { color: { argb: "FFDC2626" }, bold: true };
+        }
+      });
+      row.height = 18;
     });
 
     sheet.addRow({});
@@ -1440,8 +2757,90 @@ exports.exportBalanceGeneraleExcel = async (req, res, next) => {
       soldeDebiteur: totalSoldesDebiteurs,
       soldeCrediteur: totalSoldesCrediteurs,
     });
-    totalRow.font = { bold: true, size: 12 };
 
+    totalRow.font = { bold: true, size: 12, color: { argb: "FF111827" } };
+    totalRow.eachCell((cell, col) => {
+      cell.border = borderThin;
+      cell.fill = {
+        type: "pattern",
+        pattern: "solid",
+        fgColor: { argb: "FFD1FAE5" },
+      };
+      cell.alignment = {
+        vertical: "middle",
+        horizontal: col <= 2 ? "right" : "right",
+      };
+      if (col >= 3) {
+        cell.numFmt = '#,##0.00" USD"';
+      }
+    });
+
+    // =====================
+    // ONGLET 3 : LÉGENDE
+    // =====================
+    const legend = workbook.addWorksheet("Légende", {
+      views: [{ showGridLines: false }],
+    });
+
+    legend.mergeCells("A1:D1");
+    const lTitle = legend.getCell("A1");
+    lTitle.value = "LÉGENDE ET LECTURE DE LA BALANCE";
+    lTitle.font = { size: 16, bold: true, color: { argb: "FFFFFFFF" } };
+    lTitle.alignment = { horizontal: "center", vertical: "middle" };
+    lTitle.fill = titleFill;
+    legend.getRow(1).height = 30;
+
+    legend.addRow([]);
+    legend.addRow(["Élément", "Description", "", ""]);
+    legend.getRow(3).font = { bold: true };
+    legend.getRow(3).height = 22;
+
+    const legendRows = [
+      [
+        "Balance générale",
+        "Tableau récapitulatif de tous les comptes avec totaux débit/crédit et soldes.",
+      ],
+      [
+        "Total débit / crédit",
+        "Somme des débits et crédits par compte sur la période (incluant l'antérieur).",
+      ],
+      [
+        "Solde débiteur",
+        "Partie du solde excédant au débit (affichée en vert).",
+      ],
+      [
+        "Solde créditeur",
+        "Partie du solde excédant au crédit (affichée en rouge).",
+      ],
+      [
+        "Équilibre global",
+        "La différence Total Débit - Total Crédit doit théoriquement être nulle.",
+      ],
+      [
+        "Couleurs",
+        "Vert = débiteur, Rouge = créditeur, Ligne TOTAL = surlignée.",
+      ],
+    ];
+
+    legendRows.forEach((item) => {
+      const row = legend.addRow([item[0], item[1], "", ""]);
+      row.height = 20;
+      row.eachCell((cell) => {
+        cell.border = borderThin;
+        cell.alignment = {
+          horizontal: "left",
+          vertical: "middle",
+          wrapText: true,
+        };
+      });
+    });
+
+    legend.getColumn(1).width = 28;
+    legend.getColumn(2).width = 70;
+    legend.getColumn(3).width = 5;
+    legend.getColumn(4).width = 5;
+
+    // 5) EXPORT
     const fileName = `balance_generale_${fromDate
       .toISOString()
       .substring(0, 10)}_${toDate.toISOString().substring(0, 10)}.xlsx`;
@@ -1734,7 +3133,7 @@ exports.exportCompteResultatChargesProduitsExcel = async (req, res, next) => {
 
     const Compte = require("../../models/comptable/Compte");
 
-    // 1) SOLDES AVANT PERIODE pour classes 6 et 7
+    // 1) SOLDES AVANT PERIODE (classes 6 et 7)
     const lignesAvant = await EcritureComptable.aggregate([
       {
         $match: {
@@ -1804,7 +3203,7 @@ exports.exportCompteResultatChargesProduitsExcel = async (req, res, next) => {
       });
     });
 
-    // 2) MOUVEMENTS DE LA PERIODE
+    // 2) MOUVEMENTS DE LA PERIODE (classes 6 et 7)
     const lignes = await EcritureComptable.aggregate([
       {
         $match: {
@@ -1852,7 +3251,7 @@ exports.exportCompteResultatChargesProduitsExcel = async (req, res, next) => {
       else if (l.sens === "CREDIT") cpt.totalCredit += montant;
     }
 
-    // 3) Injecter le report dans la période
+    // 3) Injecter les soldes antérieurs dans la période
     mapAvant.forEach((val, numero) => {
       if (!comptesMap.has(numero)) {
         comptesMap.set(numero, {
@@ -1873,7 +3272,7 @@ exports.exportCompteResultatChargesProduitsExcel = async (req, res, next) => {
       }
     });
 
-    // 4) Construire charges / produits + totaux
+    // 4) Construire charges / produits
     const charges = [];
     const produits = [];
     let totalCharges = 0;
@@ -1926,51 +3325,330 @@ exports.exportCompteResultatChargesProduitsExcel = async (req, res, next) => {
     produits.sort((a, b) => a.numero.localeCompare(b.numero));
 
     const resultat = totalProduits - totalCharges;
+    const marge = totalProduits !== 0 ? (resultat / totalProduits) * 100 : 0;
 
+    // ========= EXCEL =========
     const workbook = new ExcelJS.Workbook();
-    const sheet = workbook.addWorksheet("Compte de résultat");
+    workbook.creator = "Gabkut Schola";
+    workbook.lastModifiedBy = "Compte de Résultat";
+    workbook.created = new Date();
+    workbook.modified = new Date();
+
+    const titleFill = {
+      type: "pattern",
+      pattern: "solid",
+      fgColor: { argb: "FF111827" },
+    };
+    const headerFill = {
+      type: "pattern",
+      pattern: "solid",
+      fgColor: { argb: "FFE5E7EB" },
+    };
+    const borderThin = {
+      top: { style: "thin", color: { argb: "FF9CA3AF" } },
+      left: { style: "thin", color: { argb: "FF9CA3AF" } },
+      bottom: { style: "thin", color: { argb: "FF9CA3AF" } },
+      right: { style: "thin", color: { argb: "FF9CA3AF" } },
+    };
+    const periodLabel = `du ${fromDate.toLocaleDateString(
+      "fr-FR"
+    )} au ${toDate.toLocaleDateString("fr-FR")}`;
+    const formatUsd = (v) =>
+      v == null
+        ? "-"
+        : `${v.toLocaleString("en-US", {
+            minimumFractionDigits: 2,
+            maximumFractionDigits: 2,
+          })} USD`;
+
+    // ======================
+    // ONGLET 1 : DASHBOARD
+    // ======================
+    const dash = workbook.addWorksheet("Dashboard Résultat", {
+      views: [{ showGridLines: false }],
+    });
+
+    dash.mergeCells("A1", "E1");
+    dash.getCell("A1").value =
+      "Compte de résultat - Collège Le Mérite";
+    dash.getCell("A1").font = {
+      bold: true,
+      size: 16,
+      color: { argb: "FFFFFFFF" },
+    };
+    dash.getCell("A1").alignment = {
+      horizontal: "center",
+      vertical: "middle",
+    };
+    dash.getCell("A1").fill = titleFill;
+
+    dash.mergeCells("A2", "E2");
+    dash.getCell("A2").value = `Période ${periodLabel}`;
+    dash.getCell("A2").font = {
+      bold: true,
+      size: 12,
+      color: { argb: "FFFFFFFF" },
+    };
+    dash.getCell("A2").alignment = {
+      horizontal: "center",
+      vertical: "middle",
+    };
+    dash.getCell("A2").fill = titleFill;
+
+    dash.getRow(1).height = 24;
+    dash.getRow(2).height = 20;
+    dash.addRow([]);
+
+    const kpiRow = 4;
+    const kpis = [
+      {
+        label: "Total Produits",
+        value: formatUsd(totalProduits),
+        icon: "📈",
+        color: "FF16A34A",
+      },
+      {
+        label: "Total Charges",
+        value: formatUsd(totalCharges),
+        icon: "📉",
+        color: "FFDC2626",
+      },
+      {
+        label: "Résultat (P - C)",
+        value: formatUsd(resultat),
+        icon: resultat >= 0 ? "✅" : "⚠️",
+        color: resultat >= 0 ? "FF0EA5E9" : "FFDC2626",
+      },
+      {
+        label: "Marge nette",
+        value: totalProduits
+          ? `${marge.toFixed(2)} %`
+          : "-",
+        icon: "📊",
+        color: "FF6366F1",
+      },
+      {
+        label: "Nb comptes (6/7)",
+        value: charges.length + produits.length,
+        icon: "📘",
+        color: "FF4B5563",
+      },
+    ];
+
+    kpis.forEach((kpi, idx) => {
+      const col = String.fromCharCode(65 + idx);
+
+      const iconCell = dash.getCell(`${col}${kpiRow}`);
+      iconCell.value = kpi.icon;
+      iconCell.font = { size: 20 };
+      iconCell.alignment = { horizontal: "center", vertical: "middle" };
+
+      const valueCell = dash.getCell(`${col}${kpiRow + 1}`);
+      valueCell.value = kpi.value;
+      valueCell.font = {
+        size: 13,
+        bold: true,
+        color: { argb: "FFFFFFFF" },
+      };
+      valueCell.alignment = {
+        horizontal: "center",
+        vertical: "middle",
+        wrapText: true,
+      };
+      valueCell.fill = {
+        type: "pattern",
+        pattern: "solid",
+        fgColor: { argb: kpi.color },
+      };
+
+      const labelCell = dash.getCell(`${col}${kpiRow + 2}`);
+      labelCell.value = kpi.label;
+      labelCell.font = { size: 10, bold: true };
+      labelCell.alignment = { horizontal: "center", vertical: "middle" };
+      labelCell.fill = {
+        type: "pattern",
+        pattern: "solid",
+        fgColor: { argb: "FFF3F4F6" },
+      };
+
+      dash.getColumn(col).width = 20;
+    });
+
+    dash.getRow(kpiRow).height = 28;
+    dash.getRow(kpiRow + 1).height = 34;
+    dash.getRow(kpiRow + 2).height = 22;
+
+    // ======================
+    // ONGLET 2 : COMPTE DÉTAILLÉ
+    // ======================
+    const sheet = workbook.addWorksheet("Compte de résultat", {
+      views: [{ state: "frozen", ySplit: 4 }],
+    });
 
     sheet.mergeCells("A1", "D1");
     sheet.getCell("A1").value =
       "Compte de résultat - Collège Le Mérite";
-    sheet.getCell("A1").font = { bold: true, size: 14 };
-    sheet.getCell("A1").alignment = { horizontal: "center" };
+    sheet.getCell("A1").font = {
+      bold: true,
+      size: 14,
+      color: { argb: "FFFFFFFF" },
+    };
+    sheet.getCell("A1").alignment = { horizontal: "center", vertical: "middle" };
+    sheet.getCell("A1").fill = titleFill;
 
     sheet.mergeCells("A2", "D2");
-    sheet.getCell("A2").value = `Période du ${fromDate.toLocaleDateString(
-      "fr-FR"
-    )} au ${toDate.toLocaleDateString("fr-FR")}`;
-    sheet.getCell("A2").alignment = { horizontal: "center" };
+    sheet.getCell("A2").value = `Période ${periodLabel}`;
+    sheet.getCell("A2").font = {
+      bold: true,
+      size: 11,
+      color: { argb: "FFFFFFFF" },
+    };
+    sheet.getCell("A2").alignment = { horizontal: "center", vertical: "middle" };
+    sheet.getCell("A2").fill = titleFill;
 
+    sheet.getRow(1).height = 22;
+    sheet.getRow(2).height = 18;
     sheet.addRow([]);
 
     sheet.columns = [
-      { header: "Compte charges", key: "c_num", width: 28 },
+      { header: "Compte charges", key: "c_num", width: 32 },
       { header: "Montant charges (USD)", key: "c_solde", width: 22 },
-      { header: "Compte produits", key: "p_num", width: 28 },
+      { header: "Compte produits", key: "p_num", width: 32 },
       { header: "Montant produits (USD)", key: "p_solde", width: 24 },
     ];
+
+    const headerRow = sheet.getRow(4);
+    headerRow.font = { bold: true, color: { argb: "FF111827" }, size: 11 };
+    headerRow.alignment = { horizontal: "center", vertical: "middle" };
+    headerRow.fill = headerFill;
+    headerRow.height = 20;
+    headerRow.eachCell((cell) => {
+      cell.border = borderThin;
+    });
 
     const maxRows = Math.max(charges.length, produits.length);
     for (let i = 0; i < maxRows; i++) {
       const c = charges[i];
       const p = produits[i];
-      sheet.addRow({
+      const row = sheet.addRow({
         c_num: c ? `${c.numero} - ${c.intitule}` : "",
         c_solde: c ? c.solde : "",
         p_num: p ? `${p.numero} - ${p.intitule}` : "",
         p_solde: p ? p.solde : "",
       });
+
+      const bgColor = i % 2 === 0 ? "FFFFFFFF" : "FFF9FAFB";
+
+      row.eachCell((cell, col) => {
+        cell.fill = {
+          type: "pattern",
+          pattern: "solid",
+          fgColor: { argb: bgColor },
+        };
+        cell.border = borderThin;
+        cell.alignment = {
+          vertical: "middle",
+          horizontal: col === 1 || col === 3 ? "left" : "right",
+        };
+        if (col === 2 || col === 4) {
+          cell.numFmt = '#,##0.00" USD"';
+        }
+      });
+      row.height = 18;
     }
 
+    sheet.addRow({});
     const resRow = sheet.addRow({
       c_num: "",
       c_solde: "",
       p_num: "Résultat (Produits - Charges)",
       p_solde: resultat,
     });
-    resRow.font = { bold: true };
+    resRow.font = { bold: true, size: 12 };
+    resRow.eachCell((cell, col) => {
+      cell.border = borderThin;
+      cell.fill = {
+        type: "pattern",
+        pattern: "solid",
+        fgColor: resultat >= 0 ? "FFD1FAE5" : "FFFEE2E2",
+      };
+      cell.alignment = {
+        vertical: "middle",
+        horizontal: col === 3 ? "right" : "right",
+      };
+      if (col === 4) {
+        cell.numFmt = '#,##0.00" USD"';
+        cell.font = {
+          bold: true,
+          color: {
+            argb: resultat >= 0 ? "FF16A34A" : "FFDC2626",
+          },
+        };
+      }
+    });
 
+    // ======================
+    // ONGLET 3 : LÉGENDE
+    // ======================
+    const legend = workbook.addWorksheet("Légende", {
+      views: [{ showGridLines: false }],
+    });
+
+    legend.mergeCells("A1:D1");
+    const lTitle = legend.getCell("A1");
+    lTitle.value = "LÉGENDE ET LECTURE DU COMPTE DE RÉSULTAT";
+    lTitle.font = { size: 16, bold: true, color: { argb: "FFFFFFFF" } };
+    lTitle.alignment = { horizontal: "center", vertical: "middle" };
+    lTitle.fill = titleFill;
+    legend.getRow(1).height = 30;
+
+    legend.addRow([]);
+    legend.addRow(["Élément", "Description", "", ""]);
+    legend.getRow(3).font = { bold: true };
+    legend.getRow(3).height = 22;
+
+    const legendRows = [
+      [
+        "Charges (classe 6)",
+        "Comptes de charges de l'établissement (frais, salaires, fournitures, etc.).",
+      ],
+      [
+        "Produits (classe 7)",
+        "Comptes de produits (frais scolaires, subventions, autres revenus).",
+      ],
+      [
+        "Résultat",
+        "Total Produits - Total Charges, mis en couleur selon qu'il est bénéficiaire (vert) ou déficitaire (rouge).",
+      ],
+      [
+        "Marge nette",
+        "Résultat / Total Produits, indicateur de performance globale.",
+      ],
+      [
+        "Soldes antérieurs",
+        "Les soldes des périodes précédentes sont intégrés dans les montants analysés.",
+      ],
+    ];
+
+    legendRows.forEach((item) => {
+      const row = legend.addRow([item[0], item[1], "", ""]);
+      row.height = 20;
+      row.eachCell((cell) => {
+        cell.border = borderThin;
+        cell.alignment = {
+          horizontal: "left",
+          vertical: "middle",
+          wrapText: true,
+        };
+      });
+    });
+
+    legend.getColumn(1).width = 28;
+    legend.getColumn(2).width = 70;
+    legend.getColumn(3).width = 5;
+    legend.getColumn(4).width = 5;
+
+    // EXPORT
     const fileName = `compte_resultat_${fromDate
       .toISOString()
       .substring(0, 10)}_${toDate.toISOString().substring(0, 10)}.xlsx`;
@@ -1987,7 +3665,10 @@ exports.exportCompteResultatChargesProduitsExcel = async (req, res, next) => {
     await workbook.xlsx.write(res);
     res.end();
   } catch (err) {
-    console.error("Erreur exportCompteResultatChargesProduitsExcel:", err);
+    console.error(
+      "Erreur exportCompteResultatChargesProduitsExcel:",
+      err
+    );
     next(err);
   }
 };
@@ -2096,23 +3777,195 @@ exports.exportBilanExcel = async (req, res) => {
       }
     });
 
+    // Tri (facultatif)
+    actif.sort((a, b) => a.numero.localeCompare(b.numero));
+    passif.sort((a, b) => a.numero.localeCompare(b.numero));
+
     const workbook = new ExcelJS.Workbook();
-    const sheet = workbook.addWorksheet("Bilan");
+    workbook.creator = "Gabkut Schola";
+    workbook.lastModifiedBy = "Bilan comptable";
+    workbook.created = new Date();
+    workbook.modified = new Date();
+
+    const titleFill = {
+      type: "pattern",
+      pattern: "solid",
+      fgColor: { argb: "FF111827" },
+    };
+    const headerFill = {
+      type: "pattern",
+      pattern: "solid",
+      fgColor: { argb: "FFE5E7EB" },
+    };
+    const borderThin = {
+      top: { style: "thin", color: { argb: "FF9CA3AF" } },
+      left: { style: "thin", color: { argb: "FF9CA3AF" } },
+      bottom: { style: "thin", color: { argb: "FF9CA3AF" } },
+      right: { style: "thin", color: { argb: "FF9CA3AF" } },
+    };
+    const periodeLabel =
+      from && to
+        ? `du ${dateDebut.toLocaleDateString("fr-FR")} au ${dateFin.toLocaleDateString("fr-FR")}`
+        : `au ${dateFin.toLocaleDateString("fr-FR")}`;
+    const formatUsd = (v) =>
+      v == null
+        ? "-"
+        : `${v.toLocaleString("en-US", {
+            minimumFractionDigits: 2,
+            maximumFractionDigits: 2,
+          })} USD`;
+
+    // ======================
+    // ONGLET 1 : DASHBOARD
+    // ======================
+    const dash = workbook.addWorksheet("Dashboard Bilan", {
+      views: [{ showGridLines: false }],
+    });
+
+    dash.mergeCells("A1", "E1");
+    dash.getCell("A1").value = "Bilan comptable - Collège Le Mérite";
+    dash.getCell("A1").font = {
+      bold: true,
+      size: 16,
+      color: { argb: "FFFFFFFF" },
+    };
+    dash.getCell("A1").alignment = {
+      horizontal: "center",
+      vertical: "middle",
+    };
+    dash.getCell("A1").fill = titleFill;
+
+    dash.mergeCells("A2", "E2");
+    dash.getCell("A2").value = `Type : ${type.toUpperCase()} • Période ${periodeLabel}`;
+    dash.getCell("A2").font = {
+      bold: true,
+      size: 12,
+      color: { argb: "FFFFFFFF" },
+    };
+    dash.getCell("A2").alignment = {
+      horizontal: "center",
+      vertical: "middle",
+    };
+    dash.getCell("A2").fill = titleFill;
+
+    dash.getRow(1).height = 24;
+    dash.getRow(2).height = 20;
+    dash.addRow([]);
+
+    const kpiRow = 4;
+    const desequilibre = totalActif - (totalPassif + resultat);
+
+    const kpis = [
+      { label: "Total Actif", value: formatUsd(totalActif), icon: "🏦", color: "FF0EA5E9" },
+      { label: "Total Passif", value: formatUsd(totalPassif), icon: "📑", color: "FF6366F1" },
+      { label: "Résultat (bilan)", value: formatUsd(resultat), icon: resultat >= 0 ? "✅" : "⚠️", color: resultat >= 0 ? "FF22C55E" : "FFDC2626" },
+      { label: "Actif - (Passif+Rés.)", value: formatUsd(desequilibre), icon: "⚖️", color: Math.abs(desequilibre) < 0.01 ? "FF16A34A" : "FFDC2626" },
+      { label: "Nb comptes", value: comptesBilan.length, icon: "📘", color: "FF4B5563" },
+    ];
+
+    kpis.forEach((kpi, idx) => {
+      const col = String.fromCharCode(65 + idx);
+
+      const iconCell = dash.getCell(`${col}${kpiRow}`);
+      iconCell.value = kpi.icon;
+      iconCell.font = { size: 20 };
+      iconCell.alignment = { horizontal: "center", vertical: "middle" };
+
+      const valueCell = dash.getCell(`${col}${kpiRow + 1}`);
+      valueCell.value = kpi.value;
+      valueCell.font = {
+        size: 13,
+        bold: true,
+        color: { argb: "FFFFFFFF" },
+      };
+      valueCell.alignment = {
+        horizontal: "center",
+        vertical: "middle",
+        wrapText: true,
+      };
+      valueCell.fill = {
+        type: "pattern",
+        pattern: "solid",
+        fgColor: { argb: kpi.color },
+      };
+
+      const labelCell = dash.getCell(`${col}${kpiRow + 2}`);
+      labelCell.value = kpi.label;
+      labelCell.font = { size: 10, bold: true };
+      labelCell.alignment = { horizontal: "center", vertical: "middle" };
+      labelCell.fill = {
+        type: "pattern",
+        pattern: "solid",
+        fgColor: { argb: "FFF3F4F6" },
+      };
+
+      dash.getColumn(col).width = 20;
+    });
+
+    dash.getRow(kpiRow).height = 28;
+    dash.getRow(kpiRow + 1).height = 34;
+    dash.getRow(kpiRow + 2).height = 22;
+
+    // ======================
+    // ONGLET 2 : BILAN
+    // ======================
+    const sheet = workbook.addWorksheet("Bilan", {
+      views: [{ state: "frozen", ySplit: 4 }],
+    });
+
+    sheet.mergeCells("A1", "F1");
+    sheet.getCell("A1").value = "Bilan comptable - Collège Le Mérite";
+    sheet.getCell("A1").font = {
+      bold: true,
+      size: 14,
+      color: { argb: "FFFFFFFF" },
+    };
+    sheet.getCell("A1").alignment = {
+      horizontal: "center",
+      vertical: "middle",
+    };
+    sheet.getCell("A1").fill = titleFill;
+
+    sheet.mergeCells("A2", "F2");
+    sheet.getCell("A2").value = `Type : ${type.toUpperCase()} • Période ${periodeLabel}`;
+    sheet.getCell("A2").font = {
+      bold: true,
+      size: 11,
+      color: { argb: "FFFFFFFF" },
+    };
+    sheet.getCell("A2").alignment = {
+      horizontal: "center",
+      vertical: "middle",
+    };
+    sheet.getCell("A2").fill = titleFill;
+
+    sheet.getRow(1).height = 22;
+    sheet.getRow(2).height = 18;
+    sheet.addRow([]);
 
     sheet.columns = [
-      { header: "Actif - Compte", key: "actifCompte", width: 25 },
-      { header: "Actif - Intitulé", key: "actifIntitule", width: 35 },
-      { header: "Actif - Montant", key: "actifMontant", width: 18 },
-      { header: "Passif - Compte", key: "passifCompte", width: 25 },
-      { header: "Passif - Intitulé", key: "passifIntitule", width: 35 },
-      { header: "Passif - Montant", key: "passifMontant", width: 18 },
+      { header: "Actif - Compte", key: "actifCompte", width: 18 },
+      { header: "Actif - Intitulé", key: "actifIntitule", width: 32 },
+      { header: "Actif - Montant (USD)", key: "actifMontant", width: 20 },
+      { header: "Passif - Compte", key: "passifCompte", width: 18 },
+      { header: "Passif - Intitulé", key: "passifIntitule", width: 32 },
+      { header: "Passif - Montant (USD)", key: "passifMontant", width: 20 },
     ];
+
+    const headerRow = sheet.getRow(4);
+    headerRow.font = { bold: true, color: { argb: "FF111827" }, size: 11 };
+    headerRow.alignment = { horizontal: "center", vertical: "middle" };
+    headerRow.fill = headerFill;
+    headerRow.height = 20;
+    headerRow.eachCell((cell) => {
+      cell.border = borderThin;
+    });
 
     const maxRows = Math.max(actif.length, passif.length);
     for (let i = 0; i < maxRows; i++) {
       const a = actif[i];
       const p = passif[i];
-      sheet.addRow({
+      const row = sheet.addRow({
         actifCompte: a ? a.numero : "",
         actifIntitule: a ? a.intitule : "",
         actifMontant: a ? a.montant : "",
@@ -2120,20 +3973,128 @@ exports.exportBilanExcel = async (req, res) => {
         passifIntitule: p ? p.intitule : "",
         passifMontant: p ? p.montant : "",
       });
+
+      const bgColor = i % 2 === 0 ? "FFFFFFFF" : "FFF9FAFB";
+
+      row.eachCell((cell, col) => {
+        cell.fill = {
+          type: "pattern",
+          pattern: "solid",
+          fgColor: { argb: bgColor },
+        };
+        cell.border = borderThin;
+        cell.alignment = {
+          vertical: "middle",
+          horizontal:
+            col === 1 || col === 2 || col === 4 || col === 5
+              ? "left"
+              : "right",
+        };
+        if (col === 3 || col === 6) {
+          cell.numFmt = '#,##0.00" USD"';
+        }
+      });
+      row.height = 18;
     }
 
     sheet.addRow({});
-    sheet.addRow({
+    const totalRow = sheet.addRow({
       actifIntitule: "Total Actif",
       actifMontant: totalActif,
       passifIntitule: "Total Passif",
       passifMontant: totalPassif,
     });
-    sheet.addRow({
+    totalRow.font = { bold: true, size: 12, color: { argb: "FF111827" } };
+    totalRow.eachCell((cell, col) => {
+      cell.border = borderThin;
+      cell.fill = {
+        type: "pattern",
+        pattern: "solid",
+        fgColor: { argb: "FFD1FAE5" },
+      };
+      cell.alignment = {
+        vertical: "middle",
+        horizontal: col === 2 || col === 5 ? "right" : "right",
+      };
+      if (col === 3 || col === 6) {
+        cell.numFmt = '#,##0.00" USD"';
+      }
+    });
+
+    const resRow = sheet.addRow({
       actifIntitule: "Résultat (bilan)",
       actifMontant: resultat,
     });
+    resRow.font = { bold: true, size: 12 };
+    resRow.eachCell((cell, col) => {
+      cell.border = borderThin;
+      cell.fill = {
+        type: "pattern",
+        pattern: "solid",
+        fgColor: resultat >= 0 ? "FFD1FAE5" : "FFFEE2E2",
+      };
+      cell.alignment = {
+        vertical: "middle",
+        horizontal: col === 2 ? "right" : "right",
+      };
+      if (col === 3) {
+        cell.numFmt = '#,##0.00" USD"';
+        cell.font = {
+          bold: true,
+          color: {
+            argb: resultat >= 0 ? "FF16A34A" : "FFDC2626",
+          },
+        };
+      }
+    });
 
+    // ======================
+    // ONGLET 3 : LÉGENDE
+    // ======================
+    const legend = workbook.addWorksheet("Légende", {
+      views: [{ showGridLines: false }],
+    });
+
+    legend.mergeCells("A1:D1");
+    const lTitle = legend.getCell("A1");
+    lTitle.value = "LÉGENDE ET LECTURE DU BILAN";
+    lTitle.font = { size: 16, bold: true, color: { argb: "FFFFFFFF" } };
+    lTitle.alignment = { horizontal: "center", vertical: "middle" };
+    lTitle.fill = titleFill;
+    legend.getRow(1).height = 30;
+
+    legend.addRow([]);
+    legend.addRow(["Élément", "Description", "", ""]);
+    legend.getRow(3).font = { bold: true };
+    legend.getRow(3).height = 22;
+
+    const legendRows = [
+      ["Actif", "Ce que possède l'établissement (immobilisations, trésorerie, créances, etc.)."],
+      ["Passif", "Ce que doit l'établissement (dettes, capitaux propres, résultat)."],
+      ["Résultat (bilan)", "Différence entre Actif et Passif hors résultat, intégré dans la structure financière."],
+      ["Équilibre", "En pratique : Total Actif = Total Passif + Résultat (bilan)."],
+      ["Type de bilan", "Ouverture, intermédiaire ou clôture selon la période choisie."],
+    ];
+
+    legendRows.forEach((item) => {
+      const row = legend.addRow([item[0], item[1], "", ""]);
+      row.height = 20;
+      row.eachCell((cell) => {
+        cell.border = borderThin;
+        cell.alignment = {
+          horizontal: "left",
+          vertical: "middle",
+          wrapText: true,
+        };
+      });
+    });
+
+    legend.getColumn(1).width = 26;
+    legend.getColumn(2).width = 70;
+    legend.getColumn(3).width = 5;
+    legend.getColumn(4).width = 5;
+
+    // EXPORT
     res.setHeader(
       "Content-Type",
       "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
@@ -2389,17 +4350,30 @@ exports.exportCompteResultatWithAmortissements = async (req, res, next) => {
 // GET /api/comptable/budget-annuel?anneeScolaire=2025-2026&annee=2025&classeId=...
 exports.getBudgetAnnuel = async (req, res, next) => {
   try {
+    // 🔹 Paramètres
     const {
-      anneeScolaire = process.env.ANNEE_SCOLAIRE_DEFAUT || "2025-2026",
-      annee,               // année civile pour regrouper les paiements
+      anneeScolaire: qsAnneeScolaire,
+      annee,              // année civile pour regrouper les paiements
       classeId,
     } = req.query;
 
     const year = parseInt(annee, 10) || new Date().getFullYear();
+    const anneeScolaire =
+      qsAnneeScolaire ||
+      process.env.ANNEE_SCOLAIRE_DEFAUT ||
+      "2025-2026";
 
-    console.log("📊 Budget annuel (comptable):", { anneeScolaire, year, classeId });
+    console.log("📊 Budget annuel fusionné:", {
+      anneeScolaire,
+      year,
+      classeId,
+    });
 
-    // 1) Élèves actifs
+    // ============================================================
+    // 1) PARTIE PÉDAGOGIQUE : élèves + paiements (revenus attendus / réels)
+    // ============================================================
+
+    // 1.1 Élèves actifs
     const eleveFilter = {
       statut: "actif",
       anneeScolaire,
@@ -2409,7 +4383,7 @@ exports.getBudgetAnnuel = async (req, res, next) => {
     }
     const eleves = await Eleve.find(eleveFilter).populate("classe");
 
-    // 2) Attendu annuel (frais scolaires)
+    // 1.2 Attendu annuel (frais scolaires)
     let attenduAnnuel = 0;
     for (const eleve of eleves) {
       if (eleve.classe && eleve.classe.montantFrais) {
@@ -2418,10 +4392,10 @@ exports.getBudgetAnnuel = async (req, res, next) => {
     }
     console.log("➡️ Attendu annuel (frais élèves):", attenduAnnuel);
 
-    // 3) Liste d'ids élèves
+    // 1.3 Liste d'ids élèves
     const elevesIds = eleves.map((e) => e._id);
 
-    // 4) Paiements de l'année civile
+    // 1.4 Paiements de l'année civile
     const startYear = new Date(year, 0, 1, 0, 0, 0, 0);
     const endYear = new Date(year, 11, 31, 23, 59, 59, 999);
 
@@ -2436,197 +4410,170 @@ exports.getBudgetAnnuel = async (req, res, next) => {
     const paiements = await Paiement.find(paiementFilter).lean();
     console.log("➡️ Nb paiements trouvés:", paiements.length);
 
-    // 5) Regrouper par mois
+    // 1.5 Regrouper par mois (base pédagogique)
     const months = [
-      "Janvier", "Février", "Mars", "Avril",
-      "Mai", "Juin", "Juillet", "Août",
-      "Septembre", "Octobre", "Novembre", "Décembre",
+      "Janvier",
+      "Février",
+      "Mars",
+      "Avril",
+      "Mai",
+      "Juin",
+      "Juillet",
+      "Août",
+      "Septembre",
+      "Octobre",
+      "Novembre",
+      "Décembre",
     ];
 
-    const recapMois = months.map((label, index) => ({
+    const recapMoisPedagogique = months.map((label, index) => ({
       mois: index + 1,
       label,
       revenusPrevus: 0,
       revenusReels: 0,
-      depensesPrevues: 0,
-      depensesReelles: 0,
-      epargnePrevue: 0,
-      epargneReelle: 0,
-      // pour le donut
-      depensesFixes: 0,
-      depensesVariables: 0,
-      depensesCredits: 0,
     }));
 
-    // Répartition uniforme de l'attendu
+    // 1.6 Répartition uniforme de l'attendu sur 12 mois
     const attenduMensuel = attenduAnnuel / 12;
-    recapMois.forEach((m) => {
+    recapMoisPedagogique.forEach((m) => {
       m.revenusPrevus = attenduMensuel;
     });
 
-    // Paiements réels par mois
+    // 1.7 Paiements réels par mois
     let totalPayeAnnuel = 0;
     for (const p of paiements) {
       if (!p.datePaiement) continue;
       const d = new Date(p.datePaiement);
-      const m = d.getMonth(); // 0-11
+      const mIndex = d.getMonth(); // 0-11
 
       const montant = p.montant || 0;
       totalPayeAnnuel += montant;
 
-      if (recapMois[m]) {
-        recapMois[m].revenusReels += montant;
+      if (recapMoisPedagogique[mIndex]) {
+        recapMoisPedagogique[mIndex].revenusReels += montant;
       }
     }
     console.log("➡️ Total payé annuel:", totalPayeAnnuel);
 
-    // 5bis) Intégrer DepenseBudget (fixe / variable / credit / epargne)
-    const depenseFilter = {
-      annee: year,
+    // ============================================================
+    // 2) PARTIE GLOBALE : DepenseBudget + trésorerie + comptesPrefixes
+    //    (via service calculerBudgetAnnuel)
+    // ============================================================
+
+    const ecoleId = req.user?.ecoleId || null;
+
+    // calculerBudgetAnnuel doit retourner :
+    // { recapMois, totalDepensesPrevues, totalDepensesReelles,
+    //   totalEpargnePrevue, totalEpargneReelle, tresorerieDisponible, ... }
+    const budgetGlobal = await calculerBudgetAnnuel(
+      year,
       anneeScolaire,
-    };
-    const lignesBudget = await DepenseBudget.find(depenseFilter).lean();
-    console.log("➡️ Lignes DepenseBudget trouvées:", lignesBudget.length);
-    console.log(
-      "Exemple DepenseBudget:",
-      lignesBudget.slice(0, 5).map((l) => ({
-        type: l.type,
-        mois: l.mois,
-        prevu: l.prevu || l.montantPrevu,
-        reel: l.reel || l.montantReel,
-      }))
+      ecoleId
     );
 
-    const recapByMonth = new Map();
-    recapMois.forEach((m) => recapByMonth.set(m.mois, m));
+    const recapMoisGlobal = Array.isArray(budgetGlobal.recapMois)
+      ? budgetGlobal.recapMois
+      : [];
 
-    lignesBudget.forEach((l) => {
-      const m = recapByMonth.get(l.mois);
-      if (!m) return;
+    // ============================================================
+    // 3) FUSION PAR MOIS : revenus (pédagogique) + dépenses/épargne (global)
+    // ============================================================
 
-      const prevu = Number(l.prevu || l.montantPrevu || 0);
-      const reel = Number(l.reel || l.montantReel || 0);
+    const recapByMonthGlobal = new Map();
+    recapMoisGlobal.forEach((m) => recapByMonthGlobal.set(m.mois, m));
 
-      if (l.type === "fixe") {
-        m.depensesFixes = (m.depensesFixes || 0) + prevu;
-        m.depensesPrevues = (m.depensesPrevues || 0) + prevu;
-        m.depensesReelles = (m.depensesReelles || 0) + reel;
-      }
+    const recapMoisFusion = recapMoisPedagogique.map((mPed) => {
+      const g = recapByMonthGlobal.get(mPed.mois) || {};
 
-      if (l.type === "variable") {
-        m.depensesVariables = (m.depensesVariables || 0) + prevu;
-        m.depensesPrevues = (m.depensesPrevues || 0) + prevu;
-        m.depensesReelles = (m.depensesReelles || 0) + reel;
-      }
-
-      if (l.type === "credit") {
-        m.depensesCredits = (m.depensesCredits || 0) + prevu;
-        m.depensesPrevues = (m.depensesPrevues || 0) + prevu;
-        m.depensesReelles = (m.depensesReelles || 0) + reel;
-      }
-
-      if (l.type === "epargne") {
-        m.epargnePrevue = (m.epargnePrevue || 0) + prevu;
-        m.epargneReelle = (m.epargneReelle || 0) + reel;
-      }
+      return {
+        mois: mPed.mois,
+        label: mPed.label,
+        // revenus (pédagogique)
+        revenusPrevus: mPed.revenusPrevus || 0,
+        revenusReels: mPed.revenusReels || 0,
+        // dépenses / épargne (global)
+        depensesPrevues: g.depensesPrevues || 0,
+        depensesReelles: g.depensesReelles || 0,
+        epargnePrevue: g.epargnePrevue || 0,
+        epargneReelle: g.epargneReelle || 0,
+        // pour le donut (global)
+        depensesFixes: g.depensesFixes || 0,
+        depensesVariables: g.depensesVariables || 0,
+        depensesCredits: g.depensesCredits || 0,
+      };
     });
 
-    // résumé donut backend (sur PRÉVUS par type)
-    const totalFixesPrevus = recapMois.reduce(
-      (s, m) => s + (m.depensesFixes || 0),
-      0
-    );
-    const totalVariablesPrevus = recapMois.reduce(
-      (s, m) => s + (m.depensesVariables || 0),
-      0
-    );
-    const totalCreditsPrevus = recapMois.reduce(
-      (s, m) => s + (m.depensesCredits || 0),
-      0
-    );
-    const totalEpargnePrevue = recapMois.reduce(
-      (s, m) => s + (m.epargnePrevue || 0),
-      0
-    );
+    // ============================================================
+    // 4) Totaux et KPI (structure attendue par budget-annuel.js)
+    // ============================================================
 
-    console.log("📌 DONUT PREVUS BACKEND =>", {
-      totalFixesPrevus,
-      totalVariablesPrevus,
-      totalCreditsPrevus,
-      totalEpargnePrevue,
-    });
-
-    // 6) Résultats et totaux
     let totalDepensesPrevues = 0;
     let totalDepensesReelles = 0;
     let totalEpargnePrevueTotale = 0;
     let totalEpargneReelleTotale = 0;
+    let totalRevenusPrevus = 0;
+    let totalRevenusReels = 0;
 
-    recapMois.forEach((m) => {
-      m.resultat = (m.revenusReels || 0) - (m.depensesReelles || 0);
-
+    recapMoisFusion.forEach((m) => {
+      totalRevenusPrevus += m.revenusPrevus || 0;
+      totalRevenusReels += m.revenusReels || 0;
       totalDepensesPrevues += m.depensesPrevues || 0;
       totalDepensesReelles += m.depensesReelles || 0;
       totalEpargnePrevueTotale += m.epargnePrevue || 0;
       totalEpargneReelleTotale += m.epargneReelle || 0;
     });
 
-    const resultatAnnuel = totalPayeAnnuel - totalDepensesReelles;
+    const resultatAnnuel = totalRevenusReels - totalDepensesReelles;
 
-    console.log("✅ Récap Janvier:", recapMois[0]);
-    console.log("✅ Totaux budget:", {
+    // Créances élèves = revenus attendus - revenus réalisés
+    const totalCreancesEleves = Math.max(
+      (totalRevenusPrevus || 0) - (totalRevenusReels || 0),
+      0
+    );
+
+    // Tresorerie (classe 5) depuis budgetGlobal
+    const tresorerieDisponible = budgetGlobal.tresorerieDisponible || 0;
+
+    console.log("✅ Totaux budget fusionné:", {
+      totalRevenusPrevus,
+      totalRevenusReels,
       totalDepensesPrevues,
       totalDepensesReelles,
-      totalEpargnePrevue: totalEpargnePrevueTotale,
-      totalEpargneReelle: totalEpargneReelleTotale,
+      totalEpargnePrevueTotale,
+      totalEpargneReelleTotale,
       resultatAnnuel,
+      totalCreancesEleves,
+      tresorerieDisponible,
     });
 
-    // 6️⃣ Trésorerie disponible annuelle (classe 5)
-    const regexTresorerie = /^5/;
-    const statsTresorerie = await EcritureComptable.aggregate([
-      {
-        $match: {
-          dateOperation: { $gte: startYear, $lte: endYear },
-        },
-      },
-      { $unwind: "$lignes" },
-      { $match: { "lignes.compteNumero": { $regex: regexTresorerie } } },
-      {
-        $group: {
-          _id: "$lignes.sens", // DEBIT = encaissement, CREDIT = décaissement
-          total: { $sum: "$lignes.montant" },
-        },
-      },
-    ]);
+    // ============================================================
+    // 5) Réponse (compatible avec js/budget-annuel.js)
+    // ============================================================
 
-    let encaissements = 0;
-    let decaissements = 0;
-    statsTresorerie.forEach((s) => {
-      if (s._id === "DEBIT") encaissements = s.total;
-      if (s._id === "CREDIT") decaissements = s.total;
-    });
-    const tresorerieDisponible = encaissements - decaissements;
-
-    // 7) Réponse
     const response = {
       success: true,
       anneeScolaire,
       annee: year,
-      attenduAnnuel,
-      totalRevenusReels: totalPayeAnnuel,
+      // pédagogiques
+      attenduAnnuel: totalRevenusPrevus,
+      totalRevenusPrevus,
+      totalRevenusReels, // utilisé pour KPI revenus
+      // dépenses / épargne (global)
       totalDepensesPrevues,
       totalDepensesReelles,
       totalEpargnePrevue: totalEpargnePrevueTotale,
       totalEpargneReelle: totalEpargneReelleTotale,
+      // résultat + créances + trésorerie
       resultatAnnuel,
-      recapMois,
-      tresorerieDisponible,  // ✅ utilisé par le front
+      totalCreancesEleves,
+      tresorerieDisponible,
+      // détail mensuel
+      recapMois: recapMoisFusion,
     };
 
     return res.status(200).json(response);
   } catch (err) {
-    console.error("❌ Erreur getBudgetAnnuel:", err);
+    console.error("❌ Erreur getBudgetAnnuel fusionné:", err);
     return next(err);
   }
 };
@@ -2640,17 +4587,26 @@ exports.getBudgetAnnuel = async (req, res, next) => {
 exports.exportBudgetAnnuelExcel = async (req, res, next) => {
   try {
     const {
-      anneeScolaire = process.env.ANNEE_SCOLAIRE_DEFAUT || "2025-2026",
+      anneeScolaire: qsAnneeScolaire,
       annee,
+      classeId,
     } = req.query;
 
     const year = parseInt(annee, 10) || new Date().getFullYear();
+    const anneeScolaire =
+      qsAnneeScolaire ||
+      process.env.ANNEE_SCOLAIRE_DEFAUT ||
+      "2025-2026";
 
-    // 1) Élèves / revenus attendus
+    // 1) Élèves / revenus attendus (même logique que getBudgetAnnuel fusionné)
     const eleveFilter = {
       statut: "actif",
       anneeScolaire,
     };
+
+    if (classeId) {
+      eleveFilter.classe = classeId;
+    }
 
     const eleves = await Eleve.find(eleveFilter).populate("classe");
 
@@ -2663,7 +4619,7 @@ exports.exportBudgetAnnuelExcel = async (req, res, next) => {
 
     const elevesIds = eleves.map((e) => e._id);
 
-    // 2) Paiements
+    // 2) Paiements de l'année civile
     const startYear = new Date(year, 0, 1, 0, 0, 0, 0);
     const endYear = new Date(year, 11, 31, 23, 59, 59, 999);
 
@@ -2673,7 +4629,7 @@ exports.exportBudgetAnnuelExcel = async (req, res, next) => {
       datePaiement: { $gte: startYear, $lte: endYear },
     };
 
-    if (req.query.classeId) {
+    if (classeId) {
       paiementFilter.eleve = { $in: elevesIds.filter((id) => !!id) };
     }
 
@@ -2694,23 +4650,15 @@ exports.exportBudgetAnnuelExcel = async (req, res, next) => {
       "Décembre",
     ];
 
-    const recapMois = months.map((label, index) => ({
-  mois: index + 1,
-  label,
-  revenusPrevus: 0,
-  revenusReels: 0,
-  depensesPrevues: 0,
-  depensesReelles: 0,
-  epargnePrevue: 0,
-  epargneReelle: 0,
-  depensesFixes: 0,
-  depensesVariables: 0,
-  depensesCredits: 0,
-}));
-
+    const recapMoisPedagogique = months.map((label, index) => ({
+      mois: index + 1,
+      label,
+      revenusPrevus: 0,
+      revenusReels: 0,
+    }));
 
     const attenduMensuel = attenduAnnuel / 12;
-    recapMois.forEach((m) => {
+    recapMoisPedagogique.forEach((m) => {
       m.revenusPrevus = attenduMensuel;
     });
 
@@ -2718,45 +4666,49 @@ exports.exportBudgetAnnuelExcel = async (req, res, next) => {
     for (const p of paiements) {
       if (!p.datePaiement) continue;
       const d = new Date(p.datePaiement);
-      const m = d.getMonth();
+      const mIndex = d.getMonth();
       const montant = p.montant || 0;
       totalPayeAnnuel += montant;
-      if (recapMois[m]) {
-        recapMois[m].revenusReels += montant;
+      if (recapMoisPedagogique[mIndex]) {
+        recapMoisPedagogique[mIndex].revenusReels += montant;
       }
     }
 
-    // 3) Intégrer DepenseBudget aussi dans l’export
-    const depenseFilter = {
-      annee: year,
+    // 3) Partie globale : DepenseBudget + trésorerie (via service)
+    const ecoleId = req.user?.ecoleId || null;
+    const budgetGlobal = await calculerBudgetAnnuel(
+      year,
       anneeScolaire,
-    };
+      ecoleId
+    );
 
-    const lignesBudget = await DepenseBudget.find(depenseFilter).lean();
+    const recapMoisGlobal = Array.isArray(budgetGlobal.recapMois)
+      ? budgetGlobal.recapMois
+      : [];
 
-    const recapByMonth = new Map();
-    recapMois.forEach((m) => recapByMonth.set(m.mois, m));
+    // 4) Fusion par mois (revenus + dépenses/épargne)
+    const recapByMonthGlobal = new Map();
+    recapMoisGlobal.forEach((m) => recapByMonthGlobal.set(m.mois, m));
 
-    lignesBudget.forEach((l) => {
-      const m = recapByMonth.get(l.mois);
-      if (!m) return;
+    const recapMois = recapMoisPedagogique.map((mPed) => {
+      const g = recapByMonthGlobal.get(mPed.mois) || {};
+      const resultat =
+        (mPed.revenusReels || 0) - (g.depensesReelles || 0);
 
-      const prevu = Number(l.prevu || l.montantPrevu || 0);
-      const reel = Number(l.reel || l.montantReel || 0);
-
-      if (l.type === "fixe" || l.type === "variable" || l.type === "credit") {
-        m.depensesPrevues = (m.depensesPrevues || 0) + prevu;
-        m.depensesReelles = (m.depensesReelles || 0) + reel;
-      }
-
-      if (l.type === "epargne") {
-        m.epargnePrevue = (m.epargnePrevue || 0) + prevu;
-        m.epargneReelle = (m.epargneReelle || 0) + reel;
-      }
-    });
-
-    recapMois.forEach((m) => {
-      m.resultat = (m.revenusReels || 0) - (m.depensesReelles || 0);
+      return {
+        mois: mPed.mois,
+        label: mPed.label,
+        revenusPrevus: mPed.revenusPrevus || 0,
+        revenusReels: mPed.revenusReels || 0,
+        depensesPrevues: g.depensesPrevues || 0,
+        depensesReelles: g.depensesReelles || 0,
+        epargnePrevue: g.epargnePrevue || 0,
+        epargneReelle: g.epargneReelle || 0,
+        depensesFixes: g.depensesFixes || 0,
+        depensesVariables: g.depensesVariables || 0,
+        depensesCredits: g.depensesCredits || 0,
+        resultat,
+      };
     });
 
     const resultatAnnuel =
@@ -2921,7 +4873,7 @@ exports.exportBudgetAnnuelExcel = async (req, res, next) => {
 
     const noteRow = sheet.addRow({
       mois:
-        "Remarque : les recettes proviennent des paiements validés; les dépenses et l’épargne proviennent des paramètres budget (collection DepenseBudget).",
+        "Remarque : les recettes proviennent des paiements validés (élèves); les dépenses et l’épargne proviennent des paramètres budget (DepenseBudget) et de la trésorerie.",
     });
     sheet.mergeCells(noteRow.number, 1, noteRow.number, 8);
     noteRow.getCell(1).font = {
@@ -2945,7 +4897,7 @@ exports.exportBudgetAnnuelExcel = async (req, res, next) => {
     await workbook.xlsx.write(res);
     res.end();
   } catch (err) {
-    console.error("❌ Erreur exportBudgetAnnuelExcel:", err);
+    console.error("❌ Erreur exportBudgetAnnuelExcel fusionné:", err);
     return next(err);
   }
 };
